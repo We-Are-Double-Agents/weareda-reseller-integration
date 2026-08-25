@@ -1,0 +1,2940 @@
+{
+  "info": {
+    "_postman_id": "8f2a5c10-1d3e-4a7b-9c62-weareda000001",
+    "name": "WeAreDA Reseller Reference",
+    "description": "Every request in the WeAreDA reseller integration, in both directions.\n\n    WeAreDA -> Reseller   folders 01-04 and parts of 10\n                          calls INTO your commerce/ERP system\n                          auth: X-API-Key (or bearer / basic / custom)\n\n    Reseller -> WeAreDA   folders 05-08 and parts of 10\n                          the signed webhook you call\n                          auth: HMAC-SHA256 over the exact raw body\n\n    Reseller -> WeAreDA   folder 09\n    (management API)      the read API on WeAreDA's backend\n                          auth: X-Reseller-Key\n\nTHREE DIFFERENT CREDENTIALS. They are not interchangeable.\n\nWebhook requests sign themselves: a pre-request script builds the event,\nserializes it ONCE, signs those exact bytes and sets X-WeAreDA-Signature,\nX-WeAreDA-Event-Id and X-WeAreDA-Timestamp. The request body is the same\nstring that was signed.\n\nSuggested order: 01 -> 02 -> 03 (captures orderId) -> 05/07/08 -> 04.\n\nRemember while you test: orders and stock are independent flows. Nothing in\nfolders 03 or 04 changes stock anywhere, on either side.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 - Connection Test",
+      "description": "GET / - contract 4.1. WeAreDA calls your base URL with the registered credentials. Any 2xx passes.",
+      "item": [
+        {
+          "name": "GET / (valid credentials)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": []
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe connection test. Any 2xx satisfies the contract; the body is ignored."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('2xx - credentials accepted', function () {",
+                  "    pm.expect(pm.response.code).to.be.within(200, 299);",
+                  "});",
+                  "pm.test('body is JSON with ok:true (any 2xx would do)', function () {",
+                  "    pm.expect(pm.response.json().ok).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET / (no credentials -> 401)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": []
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\n401/403 means credentials rejected. WeAreDA does NOT retry these - the integration is flagged for a human (contract 4.3)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 unauthorized', function () { pm.response.to.have.status(401); });",
+                  "pm.test('does not leak the expected credential', function () {",
+                  "    const key = pm.environment.get('resellerApiKey') || '';",
+                  "    if (key) pm.expect(pm.response.text()).to.not.include(key);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 - Products",
+      "description": "GET /products - contract 4.2. Page-number pagination; WeAreDA pages until a page returns fewer items than `limit`. Only needed in pull mode.",
+      "item": [
+        {
+          "name": "GET /products",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/products",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "products"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nFull catalog page. WeAreDA accepts a bare array or an object wrapping it under data / products / items / results."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('returns a products array', function () {",
+                  "    pm.expect(pm.response.json().products).to.be.an('array');",
+                  "});",
+                  "pm.test('products carry the contract fields', function () {",
+                  "    const p = pm.response.json().products[0];",
+                  "    pm.expect(p).to.have.property('id');",
+                  "    pm.expect(p).to.have.property('name');",
+                  "    pm.expect(p).to.have.property('stock');",
+                  "    pm.expect(p).to.have.property('updated_at');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /products (paginated)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/products?page=1&limit=3",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "3"
+                }
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nWeAreDA requests page=1,2,3... until a page returns FEWER than `limit` items. Default pageSize is 200."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('respects the page size', function () {",
+                  "    pm.expect(pm.response.json().products.length).to.be.at.most(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /products?updated_since=... (incremental)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/products?updated_since=2026-08-20T00:00:00Z",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "updated_since",
+                  "value": "2026-08-20T00:00:00Z"
+                }
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nIncremental sync. An incremental pull NEVER archives missing products - only a full/reconciliation pull can do that (contract 4.2)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('every product is at or after the watermark', function () {",
+                  "    const since = new Date('2026-08-20T00:00:00Z').getTime();",
+                  "    pm.response.json().products.forEach(function (p) {",
+                  "        pm.expect(new Date(p.updated_at).getTime()).to.be.at.least(since);",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 - Orders",
+      "description": "POST /orders - contract 4.3. Idempotent on Idempotency-Key, and ALWAYS returns the reseller order id.\n\nReceiving an order changes NO stock (contract 6.4).",
+      "item": [
+        {
+          "name": "POST /orders",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:6b1e"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe delivered order. Note it carries NO external_order_id: WeAreDA identifies it by order_number + idempotency_key, and adopts YOUR id from the response.\n\nSaves the returned id into the `orderId` variable.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created (or 200 on a repeat)', function () {",
+                  "    pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('returns an order id - contract 4.3 requires it', function () {",
+                  "    const body = pm.response.json();",
+                  "    const id = body.id || body.order_id || body.external_order_id;",
+                  "    pm.expect(id, 'no recognizable order id field').to.be.a('string');",
+                  "    pm.collectionVariables.set('orderId', id);",
+                  "    console.log('Stored orderId =', id);",
+                  "});",
+                  "pm.test('status is reported', function () {",
+                  "    pm.expect(pm.response.json()).to.have.property('status');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /orders (duplicate delivery -> no second order)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:6b1e"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe SAME Idempotency-Key again. This reference returns 200 with the existing order (contract 4.3 also allows 409, but a 409 carries no id, so WeAreDA stores no external_order_id from it).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with the existing order, or 409', function () {",
+                  "    pm.expect([200, 409]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('returns the SAME order id as the first delivery', function () {",
+                  "    if (pm.response.code === 200) {",
+                  "        pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('orderId'));",
+                  "    }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /orders (malformed -> 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:bad"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nA non-auth 4xx is NOT retried: WeAreDA routes the order to manual_review (contract 4.3).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-BAD\",\n  \"items\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', function () { pm.response.to.have.status(400); });",
+                  "pm.test('explains what was wrong', function () {",
+                  "    pm.expect(pm.response.json()).to.have.property('details');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 - Order Cancellation",
+      "description": "POST /orders/{externalOrderId}/cancel and the fallback POST /orders/cancel - contract 4.4.\n\nCancelling restores NO stock. If units return to inventory, send a separate stock.updated.",
+      "item": [
+        {
+          "name": "POST /orders/{{orderId}}/cancel",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order-cancel:6b1e"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders/{{orderId}}/cancel",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe per-order path, used when WeAreDA holds your external_order_id.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"external_order_id\": \"{{orderId}}\",\n  \"reason\": \"cancelled\",\n  \"idempotency_key\": \"order-cancel:6b1e\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('2xx - cancellation accepted', function () {",
+                  "    pm.expect(pm.response.code).to.be.within(200, 299);",
+                  "});",
+                  "pm.test('the order is reported cancelled', function () {",
+                  "    pm.expect(pm.response.json().status).to.eql('cancelled');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /orders/{{orderId}}/cancel (repeat -> idempotent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order-cancel:6b1e"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders/{{orderId}}/cancel",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nContract 4.4: 404 (unknown) and 409 (already cancelled) are BOTH treated as idempotent success. This reference answers 200.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_order_id\": \"{{orderId}}\",\n  \"reason\": \"cancelled\",\n  \"idempotency_key\": \"order-cancel:6b1e\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('idempotent: 200, 404 or 409 all mean success to WeAreDA', function () {",
+                  "    pm.expect([200, 404, 409]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /orders/cancel (fallback by order_number)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders/cancel",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "cancel"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe fallback path, used when WeAreDA holds NO external_order_id for the order - it matches by order_number or idempotency_key.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"reason\": \"refunded\",\n  \"idempotency_key\": \"order-cancel:6b1e\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404 (both idempotent success)', function () {",
+                  "    pm.expect([200, 404, 409]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /orders/cancel (unknown order -> 404)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders/cancel",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "cancel"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nAn order you do not have. 404 is fine: WeAreDA treats it as idempotent success (contract 4.4).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-DOES-NOT-EXIST\",\n  \"reason\": \"cancelled\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 - and WeAreDA treats it as success', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 - WeAreDA Webhooks",
+      "description": "The signed inbound webhook - contract 6.1. One event type per HTTP request, always.",
+      "item": [
+        {
+          "name": "order.status - accepted",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'accepted' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - shipped",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'shipped' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - delivered",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'delivered' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - cancelled",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'cancelled' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - unmapped state (observe 'not mapped')",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'packed_in_warehouse' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered.\n\nThis one sends a state outside the mapping table on purpose. WeAreDA parks the event for a human and leaves integration_status exactly as it was - it does NOT fall back to manual_review."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - by order_number instead of id",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { order_number: 'ORD-1042', state: 'shipped' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nWhen WeAreDA holds no external_order_id for the order, reference it by order_number (contract 6.1)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "06 - Product Push",
+      "description": "product.updated - contract 6.5. Catalog PUSH mode.\n\nThe items are exactly the objects GET /products returns - one serializer, two transports.\n\nA push is PARTIAL: it says \"here is what changed\", never \"here is everything I have\". WeAreDA never archives a product because it was absent from a batch. To retire one, send status: \"archived\".",
+      "item": [
+        {
+          "name": "product.updated - single product",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'product.updated',",
+                  "        id: eventId,",
+                  "        products: [",
+                  "            {",
+                  "                id: 'P-1001',",
+                  "                sku: 'WIDGET-BLK',",
+                  "                name: 'Black Widget',",
+                  "                description: 'Example product',",
+                  "                price: 4999,",
+                  "                compare_at_price: 5999,",
+                  "                currency: 'USD',",
+                  "                status: 'active',",
+                  "                stock: 42,",
+                  "                images: ['https://cdn.example.com/products/widget-black-1.jpg'],",
+                  "                updated_at: new Date().toISOString(),",
+                  "                variants: []",
+                  "            }",
+                  "        ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nUpsert by `id` (your external_product_id). Unknown -> created, known -> updated. A product whose updated_at is older than what WeAreDA holds is ignored as stale."
+          },
+          "response": []
+        },
+        {
+          "name": "product.updated - batch with variants",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'product.updated',",
+                  "        id: eventId,",
+                  "        products: [",
+                  "            { id: 'P-1001', sku: 'WIDGET-BLK', name: 'Black Widget', price: 4999, currency: 'USD',",
+                  "              status: 'active', stock: 42, updated_at: new Date().toISOString(), variants: [] },",
+                  "            { id: 'P-1002', sku: 'WIDGET-PRO', name: 'Widget Pro', price: 8999, currency: 'USD',",
+                  "              status: 'active', stock: 30, updated_at: new Date().toISOString(),",
+                  "              variants: [",
+                  "                  { id: 'V-2001', sku: 'WIDGET-PRO-S', name: 'Small / Black',",
+                  "                    attributes: { size: 'S', color: 'black' }, price: 8999, stock: 12 },",
+                  "                  { id: 'V-2002', sku: 'WIDGET-PRO-M', name: 'Medium / Black',",
+                  "                    attributes: { size: 'M', color: 'black' }, price: 8999, stock: 18 }",
+                  "              ] }",
+                  "        ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nBatching within one event type is expected. Variants are matched by their own id within the product."
+          },
+          "response": []
+        },
+        {
+          "name": "product.updated - retire a product (status: archived)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'product.updated',",
+                  "        id: eventId,",
+                  "        products: [ { id: 'P-1004', name: 'Gadget Legacy', status: 'archived' } ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nThe ONLY way to retire a product in push mode. Omitting it from a batch does nothing."
+          },
+          "response": []
+        },
+        {
+          "name": "product.updated - 501 products (-> 400 too_many_items)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = (function () {",
+                  "        const products = [];",
+                  "        for (let i = 0; i < 501; i += 1) {",
+                  "            products.push({ id: 'P-BULK-' + i, name: 'Bulk product ' + i, price: 100,",
+                  "                            currency: 'USD', status: 'active', stock: 1 });",
+                  "        }",
+                  "        return { type: 'product.updated', id: eventId, products: products };",
+                  "    })();",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 too_many_items', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().error).to.eql('too_many_items');",
+                  "});",
+                  "pm.test('reports the cap', function () {",
+                  "    pm.expect(pm.response.json().max).to.eql(500);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nDeliberately over the cap. Contract 6.5: batches are capped at 500 products and 512 KB; a larger batch is REFUSED, never silently truncated. Page it like GET /products."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "07 - Stock Updates",
+      "description": "stock.updated - contract 6.2.\n\nquantity is the new ABSOLUTE on-hand value, NEVER a delta:\n    \"quantity\": 37   means   \"there are now 37\"\n    \"quantity\": 37   does NOT mean   \"add 37\"\n    \"quantity\": 0    is valid and means sold out\n\nOne event should carry EVERY affected product and variant.",
+      "item": [
+        {
+          "name": "stock.updated - one product",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'stock.updated', id: eventId, items: [ { external_product_id: 'P-1001', quantity: 37 } ] };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nAbsolute quantity. Replaying this event converges on the same state rather than accumulating."
+          },
+          "response": []
+        },
+        {
+          "name": "stock.updated - batched products AND variants (intended usage)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'stock.updated',",
+                  "        id: eventId,",
+                  "        items: [",
+                  "            { external_product_id: 'P-1001', quantity: 37 },",
+                  "            { external_variant_id: 'V-2001', quantity: 5 },",
+                  "            { external_variant_id: 'V-2002', quantity: 18 },",
+                  "            { sku: 'GADGET-MINI', quantity: 0 }",
+                  "        ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nOne request, many lines. There is NO requirement to send one webhook per product - batching is the intended, cheapest usage.\n\nLine resolution, most specific first: external_variant_id, then external_product_id, then sku (only when it matches exactly one mapped item)."
+          },
+          "response": []
+        },
+        {
+          "name": "stock.updated - sold out (quantity 0)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'stock.updated', id: eventId, items: [ { external_product_id: 'P-1003', quantity: 0 } ] };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\n0 is a real value: it is applied, not ignored."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "08 - Invoices",
+      "description": "invoice.issued - contract 6.3.\n\ndocument_url must serve a PDF over HTTPS that WeAreDA can fetch, and its host must be allow-listed via sync_config.documentHosts.\n\nLocally: run `npm run tunnel`, then set `resellerBaseUrl` to the tunnel URL so the document_url below is fetchable.\n\nRe-sending the same external_invoice_id UPDATES the invoice in place. An invoice never moves the order status and never touches stock.",
+      "item": [
+        {
+          "name": "invoice.issued (with document_url)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'invoice.issued',",
+                  "        id: eventId,",
+                  "        invoice: {",
+                  "            external_invoice_id: 'INV-2026-000123',",
+                  "            number: 'A-0007',",
+                  "            status: 'paid',",
+                  "            currency: 'USD',",
+                  "            total: 105.00,",
+                  "            issued_at: new Date().toISOString(),",
+                  "            external_order_id: pm.collectionVariables.get('orderId') || 'SO-10001',",
+                  "            document_url: (pm.environment.get('resellerBaseUrl') || '') + '/fixtures/invoices/demo.pdf'",
+                  "        }",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nThe document_url points at the sandbox's own demo PDF, served from GET /fixtures/invoices/demo.pdf."
+          },
+          "response": []
+        },
+        {
+          "name": "invoice.issued (no document)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'invoice.issued',",
+                  "        id: eventId,",
+                  "        invoice: {",
+                  "            external_invoice_id: 'INV-2026-000124',",
+                  "            number: 'A-0008',",
+                  "            status: 'issued',",
+                  "            currency: 'USD',",
+                  "            total: 42.50,",
+                  "            issued_at: new Date().toISOString(),",
+                  "            external_order_id: pm.collectionVariables.get('orderId') || 'SO-10001'",
+                  "        }",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\ndocument_url is optional. Without it the invoice is recorded with document_status 'none'."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "09 - Reseller Read API",
+      "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nContract 11. Gated on the canViewTenantOrders permission.",
+      "item": [
+        {
+          "name": "GET tenant orders",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/orders?status=confirmed&limit=25",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "confirmed"
+                },
+                {
+                  "key": "limit",
+                  "value": "25"
+                }
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nKeyset cursor pagination, newest first. limit default 25, max 100. Pass pagination.nextCursor back as `cursor`, resending the same filters."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('returns items and pagination', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.items).to.be.an('array');",
+                  "    pm.expect(body).to.have.property('pagination');",
+                  "    if (body.pagination && body.pagination.nextCursor) {",
+                  "        pm.collectionVariables.set('nextCursor', body.pagination.nextCursor);",
+                  "    }",
+                  "    if (body.items.length > 0) {",
+                  "        pm.collectionVariables.set('wearedaOrderId', body.items[0].id);",
+                  "    }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET tenant orders (next page via cursor)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/orders?status=confirmed&limit=25&cursor={{nextCursor}}",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "confirmed"
+                },
+                {
+                  "key": "limit",
+                  "value": "25"
+                },
+                {
+                  "key": "cursor",
+                  "value": "{{nextCursor}}"
+                }
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nThe cursor encodes only the (created_at, id) sort position. A tampered cursor returns 400 invalid_cursor."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, or 400 invalid_cursor if the cursor is unset/stale', function () {",
+                  "    pm.expect([200, 400]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET one order",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/orders/{{wearedaOrderId}}",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "orders",
+                "{{wearedaOrderId}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nDetail view: includes items, addresses and the `integration` projection (a safe view of the delivery lifecycle - never raw connector bodies or credentials)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404 order_not_found', function () {",
+                  "    pm.expect([200, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET order invoices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/orders/{{wearedaOrderId}}/invoices",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "orders",
+                "{{wearedaOrderId}}",
+                "invoices"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nThe same safe invoice projection embedded in the order detail."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404', function () { pm.expect([200, 404]).to.include(pm.response.code); });",
+                  "pm.test('captures an invoice id when present', function () {",
+                  "    if (pm.response.code !== 200) return;",
+                  "    const body = pm.response.json();",
+                  "    const list = Array.isArray(body) ? body : (body.items || body.invoices || []);",
+                  "    if (list.length > 0) pm.collectionVariables.set('invoiceId', list[0].id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET invoice document (presigned URL)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/invoices/{{invoiceId}}/document",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "invoices",
+                "{{invoiceId}}",
+                "document"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nReturns a SHORT-LIVED presigned URL - never the S3 bucket/key and never a long-lived link. A missing document returns a controlled 404. This download IS audited (reseller.invoice.document_requested)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404', function () { pm.expect([200, 404]).to.include(pm.response.code); });",
+                  "pm.test('returns an https document_url when present', function () {",
+                  "    if (pm.response.code !== 200) return;",
+                  "    pm.expect(pm.response.json().document_url).to.match(/^https:\\/\\//);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET tenant orders (bad key -> 401)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "rsk_deliberately_wrong"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/orders",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "orders"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA management API.\n\nA DIFFERENT PLANE from folders 01-08. Authenticated with X-Reseller-Key - not the connector credentials, not the webhook HMAC. The tenant comes from the path and must belong to you; X-Tenant-Id is never used.\n\nContract 11.7 error model: 401 invalid_reseller_key, 403 reseller_disabled / orders_permission_denied / tenant_ownership_mismatch, 404 tenant_not_found / order_not_found."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 invalid_reseller_key (this request sends a deliberately wrong key)', function () {",
+                  "    pm.expect([401, 403]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "10 - Error / Idempotency Scenarios",
+      "description": "Every failure mode the contract names, so you can see each one once on purpose instead of at 2am.",
+      "item": [
+        {
+          "name": "401 - wrong inbound credential",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "definitely-not-the-key"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": []
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nMeans WeAreDA's registered credential does not match your RESELLER_API_KEY. Not retried: the integration goes to manual_review."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 unauthorized', function () { pm.response.to.have.status(401); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "200 - duplicate order delivery creates nothing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:idempotency-demo"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nRun it as many times as you like: the order count never grows. Check GET /debug/orders.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 201, never a duplicate', function () {",
+                  "    pm.expect([200, 201, 409]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "401 - signature computed over different bytes",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Deliberately signs DIFFERENT bytes than the ones sent, to show what a",
+                  "// body/signature mismatch looks like from WeAreDA's side (contract 3.2).",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret') || '';",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'stock.updated', id: eventId, items: [ { external_product_id: 'P-1001', quantity: 37 } ] };",
+                  "const sentBody = JSON.stringify(event);",
+                  "",
+                  "// The classic mistake: signing a re-serialization instead of the bytes sent.",
+                  "const signedBody = JSON.stringify({ id: eventId, type: 'stock.updated', items: event.items });",
+                  "",
+                  "pm.variables.set('signedBody', sentBody);",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret).toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 unauthorized', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "    pm.expect(pm.response.json().error).to.eql('unauthorized');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nThe single most common webhook failure: the body was re-serialized after signing. Same data, different bytes, invalid signature."
+          },
+          "response": []
+        },
+        {
+          "name": "401 stale_timestamp - outside the replay window",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Sends a timestamp far outside the +/-5 minute replay window (contract 3.2).",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret') || '';",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'stock.updated', id: eventId, items: [ { external_product_id: 'P-1001', quantity: 37 } ] };",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// One hour in the past.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000) - 3600) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 (stale_timestamp)', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nX-WeAreDA-Timestamp is an hour old. In real life this usually means the sending machine's clock is wrong."
+          },
+          "response": []
+        },
+        {
+          "name": "400 multiple_event_types - two types in one request",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        type: 'order.status',",
+                  "        id: eventId,",
+                  "        order: { external_order_id: pm.collectionVariables.get('orderId') || 'SO-10001', state: 'fulfilled' },",
+                  "        items: [ { external_product_id: 'P-1001', quantity: 37 } ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 multiple_event_types', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().error).to.eql('multiple_event_types');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nContract 6.0: one event type per HTTP request. A mixed payload is refused WHOLE - WeAreDA never applies one half and drops the other."
+          },
+          "response": []
+        },
+        {
+          "name": "400 multiple_event_types - batch envelope",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = {",
+                  "        events: [",
+                  "            { type: 'order.status', id: eventId + '_a', order: { external_order_id: 'SO-10001', state: 'fulfilled' } },",
+                  "            { type: 'stock.updated', id: eventId + '_b', items: [ { external_product_id: 'P-1001', quantity: 37 } ] }",
+                  "        ]",
+                  "    };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 multiple_event_types', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().error).to.eql('multiple_event_types');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nThere is no batch format in this contract. Send N requests."
+          },
+          "response": []
+        },
+        {
+          "name": "400 unsupported_event - unknown type",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.created', id: eventId, order: { external_order_id: 'SO-10001' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 unsupported_event', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().error).to.eql('unsupported_event');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\n`type` must be top-level and known. An { event: { type: ... } } wrapper is not the contract either."
+          },
+          "response": []
+        },
+        {
+          "name": "200 deduped:true - same event id twice",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Reuses the event id from the previous webhook request on purpose, to show",
+                  "// dedup: contract 6.0 answers 200 { deduped: true }.",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret') || '';",
+                  "const eventId = pm.collectionVariables.get('lastEventId') || 'evt_replay_me';",
+                  "",
+                  "const event = { type: 'stock.updated', id: eventId, items: [ { external_product_id: 'P-1001', quantity: 37 } ] };",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with deduped:true (or 202 the very first time)', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('reports dedup on a repeat', function () {",
+                  "    if (pm.response.code === 200) pm.expect(pm.response.json().deduped).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\nReuses the event id of the last webhook you sent from this collection. Contract 6.0: a duplicate event id is a no-op.\n\nSend any webhook request first, then this one."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "resellerBaseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "resellerApiKey",
+      "value": "demo_secret",
+      "type": "string"
+    },
+    {
+      "key": "wearedaWebhookUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "webhookSecret",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "wearedaApiBaseUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "resellerKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tenantId",
+      "value": "TENANT_ID",
+      "type": "string"
+    },
+    {
+      "key": "orderId",
+      "value": "SO-10001",
+      "type": "string"
+    },
+    {
+      "key": "wearedaOrderId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "invoiceId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "nextCursor",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "lastEventId",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

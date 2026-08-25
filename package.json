@@ -1,0 +1,49 @@
+{
+  "name": "weareda-reseller-reference",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference implementation and local sandbox for the WeAreDA Reseller Integration API (reseller side).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --disable-warning=ExperimentalWarning src/index.ts",
+    "start": "node --disable-warning=ExperimentalWarning dist/index.js",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "tunnel": "node scripts/tunnel.mjs",
+    "mock:weareda": "node scripts/mock-weareda.mjs",
+    "cli": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts",
+    "demo:stock": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts stock P-1001 37 V-2001 5",
+    "demo:order-status": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts order-status SO-10001 shipped",
+    "demo:products": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts product-update --all",
+    "demo:invoice": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts invoice SO-10001",
+    "scenario:order": "tsx --disable-warning=ExperimentalWarning src/scenarios/order.ts",
+    "scenario:cancellation": "tsx --disable-warning=ExperimentalWarning src/scenarios/cancellation.ts",
+    "scenario:catalog-push": "tsx --disable-warning=ExperimentalWarning src/scenarios/catalog-push.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "fastify": "^5.12.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^22.18.12",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.6.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vitest": "^3.2.4"
+  }
+}

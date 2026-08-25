@@ -1,0 +1,47 @@
+# WeAreDA reseller sandbox.
+#
+#   docker compose up --build
+#
+# Then point WeAreDA at http://localhost:3000 (or run `npm run tunnel` on the
+# host to expose it over HTTPS).
+#
+# Docker is optional - `npm install && npm run dev` gives you the same sandbox.
+
+services:
+  sandbox:
+    build: .
+    image: weareda-reseller-reference:local
+    ports:
+      - '${PORT:-3000}:3000'
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_PATH: var/sandbox.db
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      ENABLE_DEBUG_ENDPOINTS: ${ENABLE_DEBUG_ENDPOINTS:-true}
+
+      # 1. WeAreDA -> Reseller (inbound credential)
+      RESELLER_API_KEY: ${RESELLER_API_KEY:-demo_secret}
+      RESELLER_AUTH_MODE: ${RESELLER_AUTH_MODE:-api_key}
+      RESELLER_AUTH_HEADER: ${RESELLER_AUTH_HEADER:-X-API-Key}
+      RESELLER_BASIC_USER: ${RESELLER_BASIC_USER:-weareda}
+      RESELLER_BASIC_PASSWORD: ${RESELLER_BASIC_PASSWORD:-demo_secret}
+
+      # 2. Reseller -> WeAreDA webhook (HMAC)
+      WEAREDA_WEBHOOK_URL: ${WEAREDA_WEBHOOK_URL:-}
+      WEAREDA_WEBHOOK_SECRET: ${WEAREDA_WEBHOOK_SECRET:-}
+
+      # 3. Reseller -> WeAreDA management API (X-Reseller-Key)
+      WEAREDA_API_BASE_URL: ${WEAREDA_API_BASE_URL:-}
+      WEAREDA_RESELLER_KEY: ${WEAREDA_RESELLER_KEY:-}
+      WEAREDA_TENANT_ID: ${WEAREDA_TENANT_ID:-}
+
+      # Set this to your tunnel URL so invoice document_url values are fetchable.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      # SQLite state: orders, cancellations, stock, event history.
+      - sandbox-data:/app/var
+    restart: unless-stopped
+
+volumes:
+  sandbox-data:
