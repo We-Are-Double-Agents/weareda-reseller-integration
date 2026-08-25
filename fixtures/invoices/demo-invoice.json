@@ -1,0 +1,9 @@
+{
+  "external_invoice_id": "INV-2026-000123",
+  "number": "A-0007",
+  "status": "issued",
+  "currency": "USD",
+  "total": 105.0,
+  "issued_at": "2026-08-25T10:00:00Z",
+  "document_file": "demo.pdf"
+}

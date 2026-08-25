@@ -1,0 +1,11 @@
+node_modules
+dist
+var
+coverage
+.git
+.env
+.env.local
+*.log
+postman
+docs
+tests
