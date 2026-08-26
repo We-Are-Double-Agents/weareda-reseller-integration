@@ -215,19 +215,25 @@ send `status: "archived"` explicitly.
 
 ### Products sync but their images do not
 
-WeAreDA fetches image URLs from your catalog. Check what your catalog actually
-advertises:
+WeAreDA fetches image URLs from your catalog, so the URL has to be reachable
+from the public internet, over HTTPS, without credentials. Check what your
+catalog actually advertises:
 
 ```bash
-curl -H "X-API-Key: demo_secret" http://localhost:3000/products | grep images
+curl -H "X-API-Key: demo_secret" http://localhost:3000/products | grep -o 'https://[^"]*png' | sort -u
 ```
 
-If the URLs say `http://localhost:3000/...`, WeAreDA cannot reach them —
-`PUBLIC_BASE_URL` is unset. Run `npm run tunnel`, set it to the tunnel URL and
-restart; the same images are then advertised as `https://<tunnel-host>/...`.
+Then fetch one of those URLs yourself, from outside your network. If that fails,
+WeAreDA's fetch fails too.
 
-If they point at a host of your own, confirm the images are actually reachable
-from the public internet, over HTTPS, without credentials.
+The bundled catalog points at `https://cdn.weareda.com/demo/products/`. The same
+images ship in `fixtures/products/`, so if the CDN is unavailable to you, point
+the catalog at a relative path instead (`/fixtures/products/toolkit.png`), run
+`npm run tunnel` and set `PUBLIC_BASE_URL` — the sandbox then serves the images
+over your tunnel.
+
+An image URL that is relative, plain `http`, or on `localhost` is never
+retrievable by WeAreDA.
 
 ### A `product.updated` push did not archive the products I left out
 

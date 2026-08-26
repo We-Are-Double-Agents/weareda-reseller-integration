@@ -1196,7 +1196,7 @@
                   "                currency: 'USD',",
                   "                status: 'active',",
                   "                stock: 42,",
-                  "                images: [(pm.environment.get('resellerBaseUrl') || '') + '/fixtures/products/widget-black-1.png'],",
+                  "                images: ['https://cdn.weareda.com/demo/products/widget-black-1.png'],",
                   "                updated_at: new Date().toISOString(),",
                   "                variants: []",
                   "            }",

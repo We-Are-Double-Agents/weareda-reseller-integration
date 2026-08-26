@@ -78,68 +78,90 @@ describe('GET /products (WeAreDA -> Reseller)', () => {
   });
 
   describe('images (contract 4.2)', () => {
-    it('resolves catalog image paths to absolute URLs WeAreDA can fetch', async () => {
+    const CDN = 'https://cdn.weareda.com/demo/products';
+
+    it('advertises the CDN URLs verbatim', async () => {
       const { body } = await get('/products');
       const product = body.products.find((p: { id: string }) => p.id === 'P-1001');
-      expect(product.images).toEqual([
-        'https://sandbox.example.test/fixtures/products/widget-black-1.png',
-        'https://sandbox.example.test/fixtures/products/widget-black-2.png',
-      ]);
+      expect(product.images).toEqual([`${CDN}/widget-black-1.png`, `${CDN}/widget-black-2.png`]);
     });
 
-    it('preserves the object image form, resolving src / url keys', async () => {
+    it('preserves the object image form', async () => {
       const { body } = await get('/products');
       const bundle = body.products.find((p: { id: string }) => p.id === 'P-1005');
       // The contract accepts strings or { src | url | image } objects; the
       // fixtures carry both so neither shape goes untested.
       expect(bundle.images).toEqual([
-        { src: 'https://sandbox.example.test/fixtures/products/bundle-1.png' },
-        { url: 'https://sandbox.example.test/fixtures/products/bundle-2.png' },
+        { src: `${CDN}/bundle-1.png` },
+        { url: `${CDN}/bundle-2.png` },
       ]);
     });
 
-    it('leaves an absolute URL untouched (a real ERP pointing at its own CDN)', () => {
+    it('every catalog image is an absolute https URL', async () => {
+      const { body } = await get('/products');
+      for (const product of body.products) {
+        for (const image of product.images) {
+          const url = typeof image === 'string' ? image : (image.src ?? image.url ?? image.image);
+          // WeAreDA fetches these itself, so a relative path or a plain http
+          // URL would simply not be retrievable.
+          expect(url, `${product.id}`).toMatch(/^https:\/\//);
+        }
+      }
+    });
+
+    it('ships the asset behind every CDN URL it advertises', async () => {
+      // The files in fixtures/products/ ARE the images that belong at
+      // cdn.weareda.com/demo/products/. This keeps the two in step: adding a
+      // product with a CDN image but forgetting to commit the file to upload
+      // fails here rather than silently 404ing on the CDN.
+      const { body } = await get('/products');
+      const names = new Set<string>();
+      for (const product of body.products) {
+        for (const image of product.images) {
+          const url = typeof image === 'string' ? image : (image.src ?? image.url ?? image.image);
+          expect(url.startsWith(`${CDN}/`), `${product.id}: ${url}`).toBe(true);
+          names.add(url.slice(`${CDN}/`.length));
+        }
+      }
+      expect(names.size).toBeGreaterThan(0);
+
+      for (const name of names) {
+        const response = await sandbox.app.inject({
+          method: 'GET',
+          url: `/fixtures/products/${name}`,
+        });
+        expect(response.statusCode, name).toBe(200);
+        expect(response.headers['content-type'], name).toBe('image/png');
+        // PNG magic number - a real image, not a placeholder string.
+        expect(response.rawPayload.subarray(1, 4).toString(), name).toBe('PNG');
+      }
+    });
+
+    it('leaves an absolute URL untouched, whatever the public base URL is', () => {
       const serialized = sandbox.products.serialize({
         id: 'P-EXT',
         name: 'External',
-        images: ['https://cdn.example.com/a.jpg', { src: 'https://cdn.example.com/b.jpg' }],
+        images: [`${CDN}/toolkit.png`, { src: 'https://cdn.example.com/b.jpg' }],
       });
       expect(serialized.images).toEqual([
-        'https://cdn.example.com/a.jpg',
+        `${CDN}/toolkit.png`,
         { src: 'https://cdn.example.com/b.jpg' },
       ]);
     });
 
-    it('falls back to the local host when PUBLIC_BASE_URL is unset', async () => {
-      const local = createTestSandbox({ publicBaseUrl: '', port: 3000 });
-      const product = local.products.find('P-1001');
-      // Same fallback the invoice document_url uses: an http://localhost URL,
-      // which is browsable by hand but NOT fetchable by WeAreDA. Running the
-      // tunnel and setting PUBLIC_BASE_URL is what makes it reachable.
-      expect(product?.images?.[0]).toBe(
-        'http://localhost:3000/fixtures/products/widget-black-1.png',
-      );
-      await local.cleanup();
-    });
-
-    it('serves every image the catalog advertises', async () => {
-      const { body } = await get('/products');
-      const paths = new Set<string>();
-      for (const product of body.products) {
-        for (const image of product.images) {
-          const url = typeof image === 'string' ? image : (image.src ?? image.url ?? image.image);
-          paths.add(new URL(url).pathname);
-        }
-      }
-      expect(paths.size).toBeGreaterThan(0);
-
-      for (const path of paths) {
-        const response = await sandbox.app.inject({ method: 'GET', url: path });
-        expect(response.statusCode, path).toBe(200);
-        expect(response.headers['content-type'], path).toBe('image/png');
-        // PNG magic number - the file is a real image, not a placeholder string.
-        expect(response.rawPayload.subarray(1, 4).toString()).toBe('PNG');
-      }
+    it('resolves a relative path against the public base URL', () => {
+      // Not used by the shipped catalog, which points at the CDN - this is the
+      // offline route: point a product at /fixtures/products/x.png and the
+      // sandbox serves the image itself over your tunnel.
+      const serialized = sandbox.products.serialize({
+        id: 'P-LOCAL',
+        name: 'Local',
+        images: ['/fixtures/products/toolkit.png', { url: '/fixtures/products/bundle-1.png' }],
+      });
+      expect(serialized.images).toEqual([
+        'https://sandbox.example.test/fixtures/products/toolkit.png',
+        { url: 'https://sandbox.example.test/fixtures/products/bundle-1.png' },
+      ]);
     });
 
     it('serves images without credentials, as WeAreDA fetches them', async () => {

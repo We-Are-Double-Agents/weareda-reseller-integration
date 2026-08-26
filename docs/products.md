@@ -95,34 +95,46 @@ Anything still mismatched can be remapped with
 `data/products.json` deliberately includes both image forms — plain strings and
 `{src}` / `{url}` objects — so you can see that both are accepted.
 
-### Product images are real files, served by the sandbox
+### Product images
 
-WeAreDA reads image URLs from your catalog and fetches them itself, so a URL
-pointing at a host that does not exist cannot be tested. The sample images are
-therefore actual PNG files in the repository, served by the sandbox:
+WeAreDA reads image URLs from your catalog and **fetches them itself**, so they
+must be absolute, HTTPS and reachable from the public internet without
+credentials.
+
+The sample catalog points at the WeAreDA demo CDN:
 
 ```
-fixtures/products/*.png   ->   GET /fixtures/products/<name>.png
+https://cdn.weareda.com/demo/products/toolkit.png
 ```
 
-The catalog stores them as repo-relative paths, and the serializer resolves them
-against `PUBLIC_BASE_URL`:
+The matching files live in this repository under `fixtures/products/`, and the
+filenames line up one-to-one with that CDN path — those are the assets that
+belong there. A test asserts the two stay in step, so adding a product with a
+CDN image but forgetting to commit the file to upload fails locally rather than
+404ing on the CDN later.
 
-| `PUBLIC_BASE_URL` | What the catalog advertises |
-|---|---|
-| unset | `http://localhost:3000/fixtures/products/widget-pro.png` (browsable by hand, **not** fetchable by WeAreDA) |
-| your tunnel URL | `https://example.trycloudflare.com/fixtures/products/widget-pro.png` (fetchable) |
+The sandbox also serves them itself:
 
-So run `npm run tunnel`, set `PUBLIC_BASE_URL`, and the whole image flow works
-end to end. Because pull and push share one serializer, a `product.updated` push
-carries exactly the same URLs.
+```
+GET /fixtures/products/toolkit.png
+```
 
-An **absolute** URL in the catalog is passed through untouched — which is what a
-real ERP pointing at its own CDN would have. The relative-path handling exists
-purely so the bundled samples can follow whatever host you are on today.
+which is the offline route. If you would rather serve the images from your own
+sandbox than from the CDN — no CDN access, or you want to test the fetch against
+a host you control — point the catalog at a **relative** path:
 
-The route is unauthenticated on purpose: WeAreDA fetches images without your
-connector credentials.
+```jsonc
+"images": ["/fixtures/products/toolkit.png"]
+```
+
+The serializer resolves relative paths against `PUBLIC_BASE_URL`, so with
+`npm run tunnel` running the catalog advertises
+`https://<tunnel-host>/fixtures/products/toolkit.png`. Absolute URLs — the
+default — are passed through untouched, which is what a real ERP pointing at its
+own CDN has.
+
+Either way, pull and push share one serializer, so a `product.updated` batch
+carries exactly the same URLs as `GET /products`.
 
 ### `updated_since`
 
