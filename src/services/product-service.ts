@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Database } from '../storage/db.js';
-import type { Product, ProductVariant } from '../weareda/types.js';
+import type { Product, ProductImage, ProductVariant } from '../weareda/types.js';
 import { isoNow } from '../lib/ids.js';
 
 export interface ProductListQuery {
@@ -37,6 +37,11 @@ export class ProductService {
   constructor(
     private readonly db: Database,
     catalogPath = 'data/products.json',
+    /**
+     * Base URL product images are resolved against. WeAreDA fetches image URLs
+     * itself, so they must be absolute and reachable - see resolveImage().
+     */
+    private readonly baseUrl = '',
   ) {
     const raw = readFileSync(resolve(process.cwd(), catalogPath), 'utf8');
     this.catalog = JSON.parse(raw) as Product[];
@@ -99,10 +104,41 @@ export class ProductService {
       currency: product.currency,
       status: product.status ?? 'active',
       stock: this.stockOf('product', product.id, product.stock ?? 0),
-      images: product.images ?? [],
+      images: (product.images ?? []).map((image) => this.resolveImage(image)),
       updated_at: this.effectiveUpdatedAt(product),
       variants,
     };
+  }
+
+  /**
+   * Turns a catalog image reference into an absolute URL.
+   *
+   * The fixtures ship as repo-relative paths (`/fixtures/products/x.png`)
+   * because a URL is only useful once you know the host - and locally that host
+   * is whatever your tunnel happens to be today. Serializing resolves them
+   * against PUBLIC_BASE_URL, so with a tunnel running WeAreDA receives
+   * https://<tunnel-host>/fixtures/products/x.png and can actually fetch it.
+   *
+   * Absolute URLs in the catalog are passed through untouched, which is what a
+   * real ERP pointing at its own CDN would have.
+   *
+   * Both accepted shapes are preserved (contract 4.2): a plain string, or an
+   * object keyed by src / url / image.
+   */
+  private resolveImage(image: ProductImage): ProductImage {
+    if (typeof image === 'string') return this.absoluteUrl(image);
+
+    const resolved: { src?: string; url?: string; image?: string } = { ...image };
+    for (const key of ['src', 'url', 'image'] as const) {
+      const value = resolved[key];
+      if (typeof value === 'string') resolved[key] = this.absoluteUrl(value);
+    }
+    return resolved;
+  }
+
+  private absoluteUrl(value: string): string {
+    if (!value.startsWith('/')) return value;
+    return this.baseUrl ? `${this.baseUrl}${value}` : value;
   }
 
   /**

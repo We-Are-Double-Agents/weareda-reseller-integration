@@ -1196,7 +1196,7 @@
                   "                currency: 'USD',",
                   "                status: 'active',",
                   "                stock: 42,",
-                  "                images: ['https://cdn.example.com/products/widget-black-1.jpg'],",
+                  "                images: [(pm.environment.get('resellerBaseUrl') || '') + '/fixtures/products/widget-black-1.png'],",
                   "                updated_at: new Date().toISOString(),",
                   "                variants: []",
                   "            }",

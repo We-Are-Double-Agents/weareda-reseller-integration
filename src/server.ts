@@ -15,7 +15,7 @@
  *   GET  /debug/{orders,products,events}    JSON inspection
  */
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { AppConfig } from './config/env.js';
+import { publicBaseUrl, type AppConfig } from './config/env.js';
 import { openDatabase, type Database } from './storage/db.js';
 import { EventLog } from './services/event-log.js';
 import { OrderService } from './services/order-service.js';
@@ -51,7 +51,11 @@ export function buildServer(config: AppConfig, options: BuildOptions = {}): Sand
 
   const db = openDatabase(options.databasePath ?? config.databasePath);
   const eventLog = new EventLog(db);
-  const products = new ProductService(db, options.catalogPath ?? 'data/products.json');
+  const products = new ProductService(
+    db,
+    options.catalogPath ?? 'data/products.json',
+    publicBaseUrl(config),
+  );
   const orders = new OrderService(db);
 
   const app = Fastify({

@@ -213,6 +213,22 @@ An incremental (`updated_since`) pull never archives.
 If you are in **push** mode, nothing is ever archived by omission — you must
 send `status: "archived"` explicitly.
 
+### Products sync but their images do not
+
+WeAreDA fetches image URLs from your catalog. Check what your catalog actually
+advertises:
+
+```bash
+curl -H "X-API-Key: demo_secret" http://localhost:3000/products | grep images
+```
+
+If the URLs say `http://localhost:3000/...`, WeAreDA cannot reach them —
+`PUBLIC_BASE_URL` is unset. Run `npm run tunnel`, set it to the tunnel URL and
+restart; the same images are then advertised as `https://<tunnel-host>/...`.
+
+If they point at a host of your own, confirm the images are actually reachable
+from the public internet, over HTTPS, without credentials.
+
 ### A `product.updated` push did not archive the products I left out
 
 Correct behaviour. A push says "here is what changed", never "here is everything

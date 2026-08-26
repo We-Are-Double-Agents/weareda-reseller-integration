@@ -177,8 +177,9 @@ gets back `202 { accepted: true, operationId }`.
 ## Connecting WeAreDA to your sandbox
 
 1. Start the server and the tunnel. Copy the public HTTPS URL.
-2. Set `PUBLIC_BASE_URL` in `.env` to that URL and restart, so `invoice.issued`
-   events carry a `document_url` WeAreDA can actually fetch.
+2. Set `PUBLIC_BASE_URL` in `.env` to that URL and restart, so the catalog's
+   product images and the `invoice.issued` `document_url` point at addresses
+   WeAreDA can actually fetch.
 3. Register the integration for your tenant (contract §2):
 
    ```jsonc
@@ -250,6 +251,7 @@ Local helpers that are **not** part of the contract:
 |---|---|---|
 | `GET` | `/healthz` | Unauthenticated liveness probe (Docker, load balancers). |
 | `GET` | `/fixtures/invoices/demo.pdf` | The demo invoice PDF, so `document_url` is fetchable. |
+| `GET` | `/fixtures/products/*.png` | The sample product images the catalog advertises. |
 | `GET` | `/debug/orders`, `/debug/products`, `/debug/events` | JSON inspection. |
 
 ---
@@ -413,7 +415,7 @@ envelope, an oversized product batch, a replayed event id.
 ## Testing
 
 ```bash
-npm test        # 117 tests
+npm test        # 125 tests
 npm run lint
 npm run build
 npm run typecheck
@@ -475,6 +477,7 @@ scripts/
   mock-weareda.mjs         stand-in WeAreDA receiver for local testing
 data/products.json         catalog fixtures
 fixtures/invoices/         demo invoice PDF + metadata
+fixtures/products/         sample product images the catalog points at
 postman/                   collection + environment
 docs/                      developer documentation
 tests/                     vitest suite

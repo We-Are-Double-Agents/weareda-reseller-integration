@@ -32,7 +32,9 @@ export function createContext(): CliContext {
 
   const db = openDatabase(config.databasePath);
   const eventLog = new EventLog(db);
-  const products = new ProductService(db);
+  // Images are resolved against the same public base URL the server uses, so a
+  // pushed catalog carries URLs WeAreDA can fetch.
+  const products = new ProductService(db, 'data/products.json', publicBaseUrl(config));
   const orders = new OrderService(db);
 
   return {

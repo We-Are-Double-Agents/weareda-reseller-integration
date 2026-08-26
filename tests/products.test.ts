@@ -77,6 +77,107 @@ describe('GET /products (WeAreDA -> Reseller)', () => {
     expect(archived.status).toBe('archived');
   });
 
+  describe('images (contract 4.2)', () => {
+    it('resolves catalog image paths to absolute URLs WeAreDA can fetch', async () => {
+      const { body } = await get('/products');
+      const product = body.products.find((p: { id: string }) => p.id === 'P-1001');
+      expect(product.images).toEqual([
+        'https://sandbox.example.test/fixtures/products/widget-black-1.png',
+        'https://sandbox.example.test/fixtures/products/widget-black-2.png',
+      ]);
+    });
+
+    it('preserves the object image form, resolving src / url keys', async () => {
+      const { body } = await get('/products');
+      const bundle = body.products.find((p: { id: string }) => p.id === 'P-1005');
+      // The contract accepts strings or { src | url | image } objects; the
+      // fixtures carry both so neither shape goes untested.
+      expect(bundle.images).toEqual([
+        { src: 'https://sandbox.example.test/fixtures/products/bundle-1.png' },
+        { url: 'https://sandbox.example.test/fixtures/products/bundle-2.png' },
+      ]);
+    });
+
+    it('leaves an absolute URL untouched (a real ERP pointing at its own CDN)', () => {
+      const serialized = sandbox.products.serialize({
+        id: 'P-EXT',
+        name: 'External',
+        images: ['https://cdn.example.com/a.jpg', { src: 'https://cdn.example.com/b.jpg' }],
+      });
+      expect(serialized.images).toEqual([
+        'https://cdn.example.com/a.jpg',
+        { src: 'https://cdn.example.com/b.jpg' },
+      ]);
+    });
+
+    it('falls back to the local host when PUBLIC_BASE_URL is unset', async () => {
+      const local = createTestSandbox({ publicBaseUrl: '', port: 3000 });
+      const product = local.products.find('P-1001');
+      // Same fallback the invoice document_url uses: an http://localhost URL,
+      // which is browsable by hand but NOT fetchable by WeAreDA. Running the
+      // tunnel and setting PUBLIC_BASE_URL is what makes it reachable.
+      expect(product?.images?.[0]).toBe(
+        'http://localhost:3000/fixtures/products/widget-black-1.png',
+      );
+      await local.cleanup();
+    });
+
+    it('serves every image the catalog advertises', async () => {
+      const { body } = await get('/products');
+      const paths = new Set<string>();
+      for (const product of body.products) {
+        for (const image of product.images) {
+          const url = typeof image === 'string' ? image : (image.src ?? image.url ?? image.image);
+          paths.add(new URL(url).pathname);
+        }
+      }
+      expect(paths.size).toBeGreaterThan(0);
+
+      for (const path of paths) {
+        const response = await sandbox.app.inject({ method: 'GET', url: path });
+        expect(response.statusCode, path).toBe(200);
+        expect(response.headers['content-type'], path).toBe('image/png');
+        // PNG magic number - the file is a real image, not a placeholder string.
+        expect(response.rawPayload.subarray(1, 4).toString()).toBe('PNG');
+      }
+    });
+
+    it('serves images without credentials, as WeAreDA fetches them', async () => {
+      const response = await sandbox.app.inject({
+        method: 'GET',
+        url: '/fixtures/products/widget-pro.png',
+      });
+      expect(response.statusCode).toBe(200);
+    });
+
+    it('refuses traversal, unknown collections and non-image files', async () => {
+      for (const url of [
+        '/fixtures/products/..%2F..%2F.env', // escaping the fixtures root
+        '/fixtures/products/..%2F..%2Fpackage.json',
+        '/fixtures/products/nope.png', // no such fixture
+        '/fixtures/products/demo.pdf', // wrong type for this collection
+        '/fixtures/unknown/widget-pro.png', // no such collection
+      ]) {
+        const response = await sandbox.app.inject({ method: 'GET', url });
+        expect(response.statusCode, url).toBe(404);
+      }
+    });
+
+    it('serves the normalized target when a path contains ..', async () => {
+      // The router normalizes `/fixtures/products/../invoices/demo.pdf` to
+      // `/fixtures/invoices/demo.pdf` BEFORE routing, so this is not a
+      // traversal escape: it resolves to exactly the file that path denotes,
+      // and that file is a public fixture either way. Asserted so the
+      // distinction between normalization and escape stays documented.
+      const response = await sandbox.app.inject({
+        method: 'GET',
+        url: '/fixtures/products/../invoices/demo.pdf',
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['content-type']).toBe('application/pdf');
+    });
+  });
+
   describe('pagination (WeAreDA pages until a page returns fewer than limit)', () => {
     it('honours page and limit', async () => {
       const page1 = await get('/products?page=1&limit=3');

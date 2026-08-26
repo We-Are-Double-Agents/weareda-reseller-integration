@@ -1,7 +1,7 @@
 # Testing
 
 ```bash
-npm test            # 117 tests, 9 files
+npm test            # 125 tests, 9 files
 npm run test:watch
 npm run typecheck
 npm run lint
@@ -18,7 +18,7 @@ files run in parallel without sharing state.
 | File | Covers |
 |---|---|
 | `tests/auth.test.ts` | Valid / missing / invalid credentials; all four contract mechanisms (`api_key`, `bearer`, `basic`, `custom`); every contract endpoint is protected; the 401 body leaks nothing. |
-| `tests/products.test.ts` | Response shape, variants with attributes, `stock: 0` as a real value, an archived product, pagination (including the short last page that stops WeAreDA, and no repeats across pages), `updated_since` filtering and inclusivity, `updated_at` moving when stock moves. |
+| `tests/products.test.ts` | Response shape, image URL resolution and serving, variants with attributes, `stock: 0` as a real value, an archived product, pagination (including the short last page that stops WeAreDA, and no repeats across pages), `updated_since` filtering and inclusivity, `updated_at` moving when stock moves. |
 | `tests/orders.test.ts` | Creation, `201` then `200`, sequential ids from `SO-10001`, payload stored verbatim, idempotency by header and by body key, different keys are different orders, a changed body under the same key still returns the first order, validation failures create nothing. |
 | `tests/cancellation.test.ts` | Per-order path, repeat cancellation, `already_cancelled`, the fallback endpoint matching by `order_number` / `idempotency_key` / `external_order_id`, the `order:` ↔ `order-cancel:` suffix match, `404` for unknown orders and its replay. |
 | **`tests/stock-independence.test.ts`** | **Mandatory.** `POST /orders` does not change stock; neither cancel path does; a full lifecycle leaves stock identical; `GET /products` reports the same before and after; absolute (non-delta) `setStock`; and a structural check that the order files contain no reference to the stock API at all. |

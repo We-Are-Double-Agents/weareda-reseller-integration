@@ -95,6 +95,35 @@ Anything still mismatched can be remapped with
 `data/products.json` deliberately includes both image forms — plain strings and
 `{src}` / `{url}` objects — so you can see that both are accepted.
 
+### Product images are real files, served by the sandbox
+
+WeAreDA reads image URLs from your catalog and fetches them itself, so a URL
+pointing at a host that does not exist cannot be tested. The sample images are
+therefore actual PNG files in the repository, served by the sandbox:
+
+```
+fixtures/products/*.png   ->   GET /fixtures/products/<name>.png
+```
+
+The catalog stores them as repo-relative paths, and the serializer resolves them
+against `PUBLIC_BASE_URL`:
+
+| `PUBLIC_BASE_URL` | What the catalog advertises |
+|---|---|
+| unset | `http://localhost:3000/fixtures/products/widget-pro.png` (browsable by hand, **not** fetchable by WeAreDA) |
+| your tunnel URL | `https://example.trycloudflare.com/fixtures/products/widget-pro.png` (fetchable) |
+
+So run `npm run tunnel`, set `PUBLIC_BASE_URL`, and the whole image flow works
+end to end. Because pull and push share one serializer, a `product.updated` push
+carries exactly the same URLs.
+
+An **absolute** URL in the catalog is passed through untouched — which is what a
+real ERP pointing at its own CDN would have. The relative-path handling exists
+purely so the bundled samples can follow whatever host you are on today.
+
+The route is unauthenticated on purpose: WeAreDA fetches images without your
+connector credentials.
+
 ### `updated_since`
 
 The incremental filter. This sandbox applies it **inclusively**
