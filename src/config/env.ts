@@ -9,6 +9,15 @@
  *   3. Reseller -> WeAreDA read API ... WEAREDA_RESELLER_KEY    (X-Reseller-Key)
  */
 import { config as loadDotenv } from 'dotenv';
+import {
+  DEFAULT_INTEGRATION_MODE,
+  INTEGRATION_MODES,
+  isIntegrationMode,
+  modeDeliversOrders,
+  modeReads,
+  productsSyncModeFor,
+  type IntegrationMode,
+} from '../weareda/integration-mode.js';
 
 loadDotenv();
 
@@ -32,6 +41,22 @@ function bool(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
+/**
+ * INTEGRATION_MODE - which of the four integration shapes this sandbox is
+ * playing (contract 1.1). It decides which endpoints the server exposes, so that
+ * a `receive_only` reseller really does answer 404 on `GET /products` instead
+ * of merely claiming it would.
+ */
+function integrationMode(): IntegrationMode {
+  const raw = str('INTEGRATION_MODE', DEFAULT_INTEGRATION_MODE).toLowerCase();
+  if (!isIntegrationMode(raw)) {
+    throw new Error(
+      `INTEGRATION_MODE must be one of: ${INTEGRATION_MODES.join(', ')} (received "${raw}")`,
+    );
+  }
+  return raw;
 }
 
 function authMode(): InboundAuthMode {
@@ -75,6 +100,25 @@ export interface AppConfig {
     resellerKey: string;
     tenantId: string;
   };
+
+  /**
+   * Connect-time integration settings (contract 1.1, 2, 6.1). These are registered with
+   * WeAreDA - `npm run cli -- integration:connect` sends them - and mirrored
+   * here so the sandbox behaves the way the registration says it will.
+   */
+  integration: {
+    /** Per RESELLER. Governs which calls WeAreDA makes to us. */
+    mode: IntegrationMode;
+    /**
+     * Per TENANT. Whether an inbound order.status may move the CUSTOMER-FACING
+     * orders.status, not just integration_status.
+     *
+     * On the wire this must be a strict boolean - the string "true" is a 400.
+     * Here it is an environment variable, so it is parsed leniently like every
+     * other flag; the strictness lives in validateConnectBody().
+     */
+    orderStatusWrite: boolean;
+  };
 }
 
 export function loadConfig(): AppConfig {
@@ -104,7 +148,26 @@ export function loadConfig(): AppConfig {
       resellerKey: str('WEAREDA_RESELLER_KEY'),
       tenantId: str('WEAREDA_TENANT_ID'),
     },
+    integration: {
+      mode: integrationMode(),
+      orderStatusWrite: bool('ORDER_STATUS_WRITE', false),
+    },
   };
+}
+
+/** Does this mode expose `GET /` and `GET /products`? */
+export function readCallsEnabled(config: AppConfig): boolean {
+  return modeReads(config.integration.mode);
+}
+
+/** Does this mode receive `POST /orders` and the cancel paths? */
+export function orderDeliveryEnabled(config: AppConfig): boolean {
+  return modeDeliversOrders(config.integration.mode);
+}
+
+/** Derived from the mode - never configured directly. */
+export function productsSyncMode(config: AppConfig): 'pull' | 'push' {
+  return productsSyncModeFor(config.integration.mode);
 }
 
 /** Base URL that WeAreDA should be able to reach (tunnel URL when configured). */

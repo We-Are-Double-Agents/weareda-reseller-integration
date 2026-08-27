@@ -5,7 +5,14 @@
  *   npm start       - compiled build
  *   docker compose up
  */
-import { loadConfig, publicBaseUrl } from './config/env.js';
+import {
+  loadConfig,
+  orderDeliveryEnabled,
+  productsSyncMode,
+  publicBaseUrl,
+  readCallsEnabled,
+} from './config/env.js';
+import { INTEGRATION_MODE_SHAPES } from './weareda/integration-mode.js';
 import { buildServer } from './server.js';
 import { banner, log, mask } from './lib/logger.js';
 import { describeInboundAuth } from './middleware/auth.js';
@@ -18,6 +25,24 @@ async function main(): Promise<void> {
 
   const base = publicBaseUrl(config);
   const isTunnelled = Boolean(config.publicBaseUrl);
+
+  const mode = config.integration.mode;
+  const shape = INTEGRATION_MODE_SHAPES[mode];
+  const reads = readCallsEnabled(config);
+  const delivery = orderDeliveryEnabled(config);
+
+  // Only the calls this mode actually receives are registered, so the banner
+  // lists exactly the routes that exist.
+  const exposed = [
+    ...(reads ? [`GET  ${base}/`, `GET  ${base}/products`] : []),
+    ...(delivery
+      ? [
+          `POST ${base}/orders`,
+          `POST ${base}/orders/{externalOrderId}/cancel`,
+          `POST ${base}/orders/cancel`,
+        ]
+      : []),
+  ];
 
   banner([
     'WeAreDA Reseller Sandbox',
@@ -35,18 +60,23 @@ async function main(): Promise<void> {
     'Use this as your WeAreDA baseUrl:',
     base,
     '',
+    `integrationMode: ${mode}   (INTEGRATION_MODE)`,
+    shape.summary,
+    `  reads          ${reads ? 'yes' : 'no  - GET / and GET /products are NOT registered'}`,
+    `  order delivery ${delivery ? 'yes' : 'no  - POST /orders is NOT registered'}`,
+    `  catalog        ${productsSyncMode(config)}   (derived from the mode, never configured directly)`,
+    `orderStatusWrite: ${config.integration.orderStatusWrite}   (ORDER_STATUS_WRITE)`,
+    '',
     'WeAreDA -> Reseller (implemented here):',
-    `GET  ${base}/`,
-    `GET  ${base}/products`,
-    `POST ${base}/orders`,
-    `POST ${base}/orders/{externalOrderId}/cancel`,
-    `POST ${base}/orders/cancel`,
+    ...(exposed.length > 0
+      ? exposed
+      : ['(nothing - this mode never calls us. We only publish webhooks.)']),
     '',
     'Inbound auth (WeAreDA -> Reseller):',
     describeInboundAuth(config),
     `RESELLER_API_KEY = ${mask(config.inbound.apiKey)}`,
     '',
-    'Reseller -> WeAreDA (outbound webhook):',
+    'Reseller -> WeAreDA (outbound webhook - available in EVERY mode):',
     config.webhook.url
       ? `POST ${config.webhook.url}`
       : 'WEAREDA_WEBHOOK_URL not set - CLI and scenarios run in DRY RUN mode',

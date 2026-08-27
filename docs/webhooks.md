@@ -4,6 +4,12 @@ Contract §3.2, §5 and §6.
 
 One endpoint, four event types, one signature scheme.
 
+> **Available in every `integrationMode`.** Inbound webhooks are not one of the
+> two axes the mode splits (contract §1.1): a `receive_only` reseller that WeAreDA
+> never calls still publishes all four event types, provided a `webhookSecret` is
+> configured. The mode governs what WeAreDA does, not what you may send. See
+> [integration-modes.md](integration-modes.md).
+
 ```http
 POST {webhookUrl}
 X-WeAreDA-Signature: sha256=<hex HMAC_SHA256(rawBody, webhookSecret)>
@@ -122,6 +128,14 @@ same error names WeAreDA would return.
 | `401` | `{ "error": "unauthorized" }` / `{ "error": "stale_timestamp" }` | bad signature / outside the window |
 | `404` | `{ "error": "not_found" }` | unknown or disconnected connection |
 
+A connection with **no configured webhook secret** is never accepted
+unauthenticated — it is always `401`, never a pass-through.
+
+`202` only says the event was queued. What the queue then made of it shows up on
+the operation: `result.detail` for one that completed, `last_error_code` for one
+that failed. The `order.status` codes are tabulated in
+[orders.md](orders.md#operation-result-diagnostics).
+
 > **`202` means accepted, not applied.** Processing is asynchronous: effects
 > land shortly after via WeAreDA's internal queue, under its own retry and DLQ.
 > Each event is applied at most once — a redelivery inside WeAreDA's own
@@ -139,6 +153,35 @@ Do not treat `202` as confirmation that stock or an order status has changed.
   types happens to work, but don't rely on it — just use distinct ids.
 - A duplicate returns `200 {deduped: true}`.
 
+### Where the event id comes from, and the trap in the last rung
+
+WeAreDA resolves it in this order:
+
+1. the `X-WeAreDA-Event-Id` header,
+2. `body.event.id` / `body.eventId` / `body.id`,
+3. **a content hash of the raw body.**
+
+That third rung is the single most common cause of "I sent it and nothing
+happened": **send the same payload twice with no distinct event id and the second
+one dedups silently** — `200 {"deduped": true}`, and nothing is applied. No error,
+no warning, no effect.
+
+```bash
+# Both of these send the identical body. The second changes nothing.
+curl -X POST "$WEAREDA_WEBHOOK_URL" -H "X-WeAreDA-Signature: sha256=…" \
+     -d '{"type":"order.status","order":{"external_order_id":"SO-10001","state":"shipped"}}'
+```
+
+Every sender in this repository generates a **fresh id per send** for exactly
+that reason: the CLI and the event builders mint an `evt_…` per event
+(`src/lib/ids.ts`), and the Postman pre-request scripts generate one per request.
+The only place an id is reused is where reuse is the point — `--event-id`, and
+folder 10's replay request.
+
+Note that a top-level `id` is the **event** id, not the order id. The order
+reference goes in `order.external_order_id` (preferred — the id you returned from
+`POST /orders`) or `order.order_number` as a fallback.
+
 This client retries only `5xx` and network failures, with exponential backoff,
 **reusing the same event id and the same body** — which is exactly what lets
 WeAreDA dedupe the retry. A `4xx` is a contract error on your side and is never
@@ -151,7 +194,7 @@ npm run cli -- stock P-1001 37 --event-id evt_replay_demo
 npm run cli -- stock P-1001 37 --event-id evt_replay_demo    # 200 deduped: true
 ```
 
-Every transition needs its own id, though:
+Every transition needs its own id, though — the CLI mints one per send:
 
 ```bash
 npm run cli -- order-status SO-10001 accepted    # evt_a…
@@ -182,6 +225,34 @@ It verifies the HMAC over the raw body and reproduces the response contract
 above — including `deduped`, `multiple_event_types`, `too_many_items`,
 `unsupported_event` and `stale_timestamp` — so you can see each outcome for
 yourself. It is a development aid, not WeAreDA.
+
+It also stands in for the WeAreDA side of an `order.status`: it applies the
+ladder and the exceptions, and records the resulting operation.
+
+```bash
+curl -X POST http://localhost:4000/api/v1/mock/orders \
+  -H 'content-type: application/json' \
+  -d '{"external_order_id":"SO-10001","status":"confirmed"}'
+
+npm run cli -- order-status SO-10001 shipped
+curl http://localhost:4000/api/v1/mock/operations   # result.detail, last_error_code
+curl http://localhost:4000/api/v1/mock/orders       # both status columns
+```
+
+and for the connect plane, so `integration:connect` is a real round trip:
+
+```env
+WEAREDA_API_BASE_URL=http://localhost:4000
+WEAREDA_RESELLER_KEY=rsk_example
+WEAREDA_TENANT_ID=tenant_demo
+```
+
+```bash
+npm run cli -- integration:connect --mode receive_and_send
+npm run cli -- integration:test      # 422 read_calls_disabled
+```
+
+The `/api/v1/mock/*` endpoints are a local aid; they are not in the contract.
 
 ---
 

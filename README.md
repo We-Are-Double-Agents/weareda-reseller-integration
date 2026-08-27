@@ -40,6 +40,8 @@ names the section.
 - [Architecture](#architecture)
 - [Five-minute quick start](#five-minute-quick-start)
 - [Connecting WeAreDA to your sandbox](#connecting-weareda-to-your-sandbox)
+- [The four integration modes](#the-four-integration-modes)
+- [Reporting order status back](#reporting-order-status-back)
 - [The three authentication contexts](#the-three-authentication-contexts)
 - [Endpoints this server implements](#endpoints-this-server-implements-weareda---reseller)
 - [Events this server sends](#events-this-server-sends-reseller---weareda)
@@ -66,17 +68,21 @@ names the section.
                     https://xxx.trycloudflare.com
                            |
                            v
-        +------------------------------------------+
-        |   Local Node server        localhost:3000 |
-        |                                           |
-        |   GET  /                  health          |
-        |   GET  /products          catalog + stock |
-        |   POST /orders            order delivery  |
-        |   POST /orders/{id}/cancel                |
-        |   POST /orders/cancel     fallback        |
-        |                                           |
-        |   SQLite: orders | stock | event history  |
-        +------------------------------------------+
+        +--------------------------------------------------+
+        |   Local Node server               localhost:3000 |
+        |                                                  |
+        |   GET  / .................. health         reads |
+        |   GET  /products .......... catalog + stock      |
+        |                                                  |
+        |   POST /orders ............ order delivery       |
+        |   POST /orders/{id}/cancel                       |
+        |   POST /orders/cancel ..... fallback    delivery |
+        |                                                  |
+        |   SQLite: orders | stock | event history         |
+        +--------------------------------------------------+
+          INTEGRATION_MODE decides which of those two groups
+          exists at all. A receive_only sandbox registers
+          neither, and still publishes every webhook below.
                            |
                            |  signed webhook (HMAC-SHA256)
                            v
@@ -178,7 +184,9 @@ gets back `202 { accepted: true, operationId }`.
 
 1. Start the server and the tunnel. Copy the public HTTPS URL.
 2. Set `PUBLIC_BASE_URL` in `.env` to that URL and restart, so `invoice.issued`
-   events carry a `document_url` WeAreDA can actually fetch.
+   events carry a `document_url` WeAreDA can actually fetch. (Product images
+   already point at `https://cdn.weareda.com/demo/products/`, so they need no
+   tunnel.)
 3. Register the integration for your tenant (contract §2):
 
    ```jsonc
@@ -189,8 +197,21 @@ gets back `202 { accepted: true, operationId }`.
      "authType": "api_key",
      "externalCredentials": { "apiKey": "demo_secret" },  // = RESELLER_API_KEY
      "webhookSecret": "whsec_example",
-     "orderDeliveryStatus": "confirmed"
+     "orderDeliveryStatus": "confirmed",
+     "integrationMode": "query_and_send",  // §1.1 - which calls WeAreDA makes
+     "orderStatusWrite": false             // §6.1 - opt-in, strict boolean
    }
+   ```
+
+   `integrationMode` and `orderStatusWrite` are **top-level** fields, siblings of
+   `orderDeliveryStatus`. Inside `declaredCapabilities` they are
+   `400 invalid_request`; inside `syncConfig`, `400 invalid_sync_config`.
+
+   The sandbox can make this call for you, validating the body locally first:
+
+   ```bash
+   npm run cli -- integration:connect --mode query_and_send --order-status-write
+   npm run cli -- integration:status
    ```
 
 4. The response returns your inbound webhook URL. Put it, and the secret you
@@ -204,10 +225,113 @@ gets back `202 { accepted: true, operationId }`.
 5. WeAreDA calls `GET /` to verify the credentials. Watch your terminal — the
    request appears as a labelled `WeAreDA -> Reseller` block.
 
-Catalog **pull** is the default. If you would rather push, set
-`syncConfig.products.mode = "push"` at connect time and use
-`npm run cli -- product-update --all`; WeAreDA then never calls `GET /products`.
-This sandbox implements both.
+Catalog **pull** is the default. If you would rather push, choose an
+`integrationMode` that does not read — `receive_and_send` or `receive_only` — and
+use `npm run cli -- product-update --all`; WeAreDA then never calls
+`GET /products`, or `GET /` either. `productsSyncMode` is **derived** from the
+mode and returned in the response; it is never an input, and a contradictory
+`syncConfig.products.mode` is a `400`. This sandbox implements both transports.
+
+---
+
+## The four integration modes
+
+Four calls go from WeAreDA to this server, and they split along **two
+independent axes** — does WeAreDA ever **read** from us, and do we ever
+**receive an order** (contract §1.1)?
+
+| Call | Axis |
+|---|---|
+| `GET /` (connection test) | reads |
+| `GET /products` (catalog pull) | reads |
+| `POST /orders` | order delivery |
+| `POST /orders/{id}/cancel` | order delivery |
+
+| `integrationMode` | reads | order delivery | catalog arrives via | you must implement |
+|---|---|---|---|---|
+| `query_and_send` **(default)** | yes | yes | scheduled pull (pushes also accepted) | all four calls |
+| `receive_and_send` | **no** | yes | `product.updated` webhooks only | `POST /orders` + cancel |
+| `query_only` | yes | **no** | scheduled pull (pushes also accepted) | `GET /` + `GET /products` |
+| `receive_only` | **no** | **no** | `product.updated` webhooks only | nothing — publish only |
+
+The four points people get wrong:
+
+- **Inbound webhooks are not an axis.** All four event types can be published in
+  **every** mode, given a webhook secret. The mode governs what WeAreDA does.
+- **`receive_and_send` is not "no outbound calls".** Orders are still delivered —
+  delivering an order is a *send*, not a query.
+- **`receive_only` still requires a `baseUrl`.** It is registered, not called.
+- **A `receive_*` mode makes the connection test impossible**, because the test is
+  itself a read: `POST …/integration/test-connection` answers `422` with
+  `reason: "read_calls_disabled"`.
+
+This sandbox does not merely describe that — it **registers only the routes its
+mode receives**:
+
+```bash
+INTEGRATION_MODE=receive_only npm run dev
+
+curl -i -H "X-API-Key: demo_secret" http://localhost:3000/           # 404
+curl -i -H "X-API-Key: demo_secret" http://localhost:3000/products   # 404
+npm run cli -- product-update --all                                  # works
+```
+
+A reseller with **no read endpoint at all** is a complete, working integration.
+
+```bash
+npm run scenario:integration-modes   # all four, started and called for real
+```
+
+Full reference, with a worked connect call and response per mode:
+[docs/integration-modes.md](docs/integration-modes.md).
+
+---
+
+## Reporting order status back
+
+An inbound `order.status` moves **two** columns, and the second one is opt-in
+(contract §6.1):
+
+| your `state` (aliases) | → `integration_status` | → `orders.status` *(opt-in only)* |
+|---|---|---|
+| `accepted` / `acknowledged` / `ack` | `accepted` | `confirmed` |
+| `shipped` / `fulfilled` | `completed` | `shipped` |
+| `delivered` / `completed` | `completed` | `delivered` |
+| `cancelled` / `canceled` | `cancelled` | `cancelled` |
+| `returned` / `return` / `refunded` / `not_delivered` / `undelivered` | `returned` | `refunded` |
+| `rejected` / `failed` / `error` | `manual_review` | *(unchanged)* |
+| anything else | not mapped → `unknown_order_state` | *(unchanged)* |
+
+`orderStatusWrite: true` at connect time turns the third column on. It then moves
+both in one atomic write and fires the same alerts and lifecycle automation a
+manual status change in the CRM fires.
+
+```
+LADDER      draft → pending → confirmed → processing → shipped → delivered
+            Only ever ADVANCES. A lower rung arriving after a higher one is a
+            late or reordered event and is ignored, not applied.
+
+EXCEPTIONS  cancelled, refunded
+            Apply from ANY rung at ANY time — including after shipped/delivered.
+```
+
+A fulfilment step for an order WeAreDA already holds as `cancelled`/`refunded` is
+a **contradiction**, not an update: the order is untouched, its
+`integration_status` becomes `manual_review`, and the operation is rejected with
+`order_status_conflict`. Neither side wins automatically.
+
+`orderStatusWrite` is per **tenant** and is about data authority;
+`integrationMode` is per **reseller** and is about topology. Choosing
+`receive_and_send` does **not** imply `orderStatusWrite` — and combining the flag
+with `query_only` / `receive_only` is a `400`, since those resellers never receive
+an order to report a status on.
+
+```bash
+npm run scenario:order-status    # the mapping, the ladder, the conflict
+```
+
+Details, the `result.detail` diagnostics and every error code:
+[docs/orders.md](docs/orders.md#reporting-progress-back).
 
 ---
 
@@ -236,13 +360,17 @@ Full detail in [docs/authentication.md](docs/authentication.md).
 
 ## Endpoints this server implements (WeAreDA -> Reseller)
 
-| Method | Path | Contract | Purpose |
-|---|---|---|---|
-| `GET` | `/` | §4.1 | Connection test. Any 2xx passes. |
-| `GET` | `/products` | §4.2 | Catalog + stock pull. `page`, `limit`, `updated_since`. |
-| `POST` | `/orders` | §4.3 | Order delivery. Idempotent. Always returns the order id. |
-| `POST` | `/orders/{externalOrderId}/cancel` | §4.4 | Cancellation by the id you returned. |
-| `POST` | `/orders/cancel` | §4.4 | Fallback: match by `order_number` or `idempotency_key`. |
+| Method | Path | Contract | Registered in | Purpose |
+|---|---|---|---|---|
+| `GET` | `/` | §4.1 | modes that **read** | Connection test. Any 2xx passes. |
+| `GET` | `/products` | §4.2 | modes that **read** | Catalog + stock pull. `page`, `limit`, `updated_since`. |
+| `POST` | `/orders` | §4.3 | modes that **deliver** | Order delivery. Idempotent. Always returns the order id. |
+| `POST` | `/orders/{externalOrderId}/cancel` | §4.4 | modes that **deliver** | Cancellation by the id you returned. |
+| `POST` | `/orders/cancel` | §4.4 | modes that **deliver** | Fallback: match by `order_number` or `idempotency_key`. |
+
+A route its `integrationMode` never receives is **not registered at all** — the
+sandbox answers `404`, exactly as a reseller that never implemented it would. The
+startup banner lists what exists.
 
 Local helpers that are **not** part of the contract:
 
@@ -250,6 +378,7 @@ Local helpers that are **not** part of the contract:
 |---|---|---|
 | `GET` | `/healthz` | Unauthenticated liveness probe (Docker, load balancers). |
 | `GET` | `/fixtures/invoices/demo.pdf` | The demo invoice PDF, so `document_url` is fetchable. |
+| `GET` | `/fixtures/products/*.png` | The sample product images, also hosted at `cdn.weareda.com/demo/products/`. |
 | `GET` | `/debug/orders`, `/debug/products`, `/debug/events` | JSON inspection. |
 
 ---
@@ -284,6 +413,9 @@ npm run cli -- <command> [args] [--dry-run] [--event-id evt_...]
 | `order-status <orderId> <state>` | `order.status` | `npm run cli -- order-status SO-10001 shipped` |
 | `product-update <ids...> \| --all` | `product.updated` | `npm run cli -- product-update --all` |
 | `invoice <orderId>` | `invoice.issued` | `npm run cli -- invoice SO-10001` |
+| `integration:connect [--mode M] [--order-status-write]` | — | connect API (contract §1.1/§2) |
+| `integration:status` | — | echoes mode, delivery, sync mode |
+| `integration:test` | — | `422 read_calls_disabled` in a `receive_*` mode |
 | `orders:list` | — | read API (contract §11) |
 | `orders:get <orderId>` | — | read API |
 | `orders:invoices <orderId>` | — | read API |
@@ -296,6 +428,7 @@ npm run demo:stock          # stock.updated with two batched lines
 npm run demo:order-status   # order.status shipped
 npm run demo:products       # product.updated with the whole catalog
 npm run demo:invoice        # invoice.issued with the demo PDF
+npm run demo:connect        # connect, query_and_send + orderStatusWrite
 ```
 
 Every command prints the destination URL, method, event type, event id,
@@ -315,9 +448,11 @@ That ordering is the whole point. See below.
 ## Guided scenarios
 
 ```bash
-npm run scenario:order          # delivery -> ERP recalculation -> stock.updated -> status transitions
-npm run scenario:cancellation   # cancellation -> no restock -> explicit restock -> stock.updated
-npm run scenario:catalog-push   # pull vs push, and what a push does NOT mean
+npm run scenario:order              # delivery -> ERP recalculation -> stock.updated -> status transitions
+npm run scenario:cancellation       # cancellation -> no restock -> explicit restock -> stock.updated
+npm run scenario:catalog-push       # pull vs push, and what a push does NOT mean
+npm run scenario:integration-modes  # the four modes, each started and called for real
+npm run scenario:order-status       # both status columns, the ladder, the conflict
 ```
 
 Each scenario narrates every step and drives **both** directions: it calls the
@@ -396,8 +531,15 @@ postman/WeAreDA Reseller Reference.postman_collection.json
 postman/WeAreDA Reseller Reference.postman_environment.json
 ```
 
-Import both, then fill in the environment. 41 requests in 10 folders covering
+Import both, then fill in the environment. 57 requests in 11 folders covering
 every endpoint, every event type and every documented error.
+
+Folder 00 registers the integration: a connect call per `integrationMode`, the
+`orderStatusWrite` opt-in, `integration/status`, `test-connection` (watch it
+answer `422 read_calls_disabled` after a `receive_*` connect) and every
+connect-time `400` — including the one that is not an error at all, a top-level
+`productsSyncMode` dropped in silence. Point `wearedaApiBaseUrl` at
+`npm run mock:weareda` to run it without a real connection.
 
 Webhook requests **sign themselves**: a pre-request script builds the event,
 serializes it once, signs those exact bytes with `webhookSecret`, and sets
@@ -408,12 +550,18 @@ Folder 10 lets you see each failure mode once, on purpose: a signature computed
 over different bytes, a stale timestamp, two event types in one request, a batch
 envelope, an oversized product batch, a replayed event id.
 
+Folder 05 covers both status columns: the `accepted -> shipped -> delivered`
+sequence, `returned` (a return is not a cancellation), a `refunded` applying
+after delivery, and a fulfilment step after a cancellation — which answers `202`
+on the transport and is then rejected on the operation with
+`order_status_conflict`.
+
 ---
 
 ## Testing
 
 ```bash
-npm test        # 117 tests
+npm test        # 199 tests
 npm run lint
 npm run build
 npm run typecheck
@@ -422,8 +570,9 @@ npm run typecheck
 Covers authentication (all four mechanisms), pagination and `updated_since`,
 order creation and idempotency, cancellation and its fallback, HMAC signing
 against a known vector, one-event-type-per-request enforcement, batch caps,
-retry/dedup behaviour, the read API's authentication plane — and the mandatory
-stock-independence tests.
+retry/dedup behaviour, the read and connect API's authentication plane, the four
+integration modes and every connect-time `400`, the `order.status` mapping,
+ladder and conflict rules — and the mandatory stock-independence tests.
 
 [docs/testing.md](docs/testing.md) describes each file.
 
@@ -464,17 +613,21 @@ src/
     event-log.ts           local history
   storage/db.ts            SQLite schema (node:sqlite, no native deps)
   weareda/
-    types.ts               wire types, state mapping, batch caps
+    types.ts               wire types, state mapping (both columns), the
+                           ladder + transition rules, batch caps
+    integration-mode.ts    the four modes, capabilities, connect-body validation
     events.ts              builders - one event type by construction
     webhook-client.ts      sign-once-send-those-bytes delivery
-    reseller-api-client.ts X-Reseller-Key read API (contract 11)
+    reseller-api-client.ts X-Reseller-Key plane: connect (contract 2) + read API (11)
   cli/                     the reseller -> WeAreDA commands
   scenarios/               guided end-to-end walkthroughs
 scripts/
   tunnel.mjs               cloudflared quick tunnel + banner
-  mock-weareda.mjs         stand-in WeAreDA receiver for local testing
+  mock-weareda.mjs         stand-in WeAreDA: webhooks, the connect plane and
+                           the order.status ladder
 data/products.json         catalog fixtures
 fixtures/invoices/         demo invoice PDF + metadata
+fixtures/products/         sample product images (the assets behind the demo CDN URLs)
 postman/                   collection + environment
 docs/                      developer documentation
 tests/                     vitest suite
@@ -488,8 +641,9 @@ tests/                     vitest suite
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit, and why they are shaped this way |
 | [docs/authentication.md](docs/authentication.md) | The three credentials, in detail |
+| [docs/integration-modes.md](docs/integration-modes.md) | `integrationMode`, `orderStatusWrite`, `declaredCapabilities` — values, defaults, placement, every `400` |
 | [docs/products.md](docs/products.md) | Catalog pull, push, pagination, `updated_since` |
-| [docs/orders.md](docs/orders.md) | Delivery, idempotency, cancellation |
+| [docs/orders.md](docs/orders.md) | Delivery, idempotency, cancellation, `order.status` and its two status columns |
 | [docs/stock.md](docs/stock.md) | Absolute quantities, batching, independence from orders |
 | [docs/webhooks.md](docs/webhooks.md) | Signing, event ids, retries, dedup, one type per request |
 | [docs/invoices.md](docs/invoices.md) | `invoice.issued` and the document fetch |

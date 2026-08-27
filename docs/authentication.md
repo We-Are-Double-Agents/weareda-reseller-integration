@@ -122,12 +122,19 @@ See [webhooks.md](webhooks.md) for delivery, retries and dedup.
 
 ## 3. Reseller -> WeAreDA management API (outbound)
 
-Contract §11. A different plane from §4–§6 entirely.
+Contract §2 (configuring the integration) and §11 (reading tenant orders). A
+different plane from §4–§6 entirely.
 
 ```http
-GET /api/v1/resellers/me/tenants/{tenantId}/orders
+GET  /api/v1/resellers/me/tenants/{tenantId}/orders
+POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
 X-Reseller-Key: rsk_...
 ```
+
+This is the plane that carries `integrationMode` and `orderStatusWrite` — the
+connect body, its `status` echo and `test-connection` all authenticate with this
+key. Registering an integration is a management action, not a connector one, so
+it never touches the HMAC or the inbound credential.
 
 - Authenticated by `X-Reseller-Key` — **not** the HMAC signature, and **not**
   your inbound connector credential.
@@ -150,7 +157,8 @@ Error model:
 | 404 | `tenant_not_found` / `order_not_found` | unknown tenant / order not in this tenant |
 | 400 | `invalid_filter` / `invalid_cursor` | bad filter value / tampered cursor |
 
-Client: `src/weareda/reseller-api-client.ts`. CLI: `npm run cli -- orders:list`.
+Client: `src/weareda/reseller-api-client.ts`. CLI: `npm run cli -- orders:list`,
+`npm run cli -- integration:connect`.
 
 ---
 

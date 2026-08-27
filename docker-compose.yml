@@ -20,6 +20,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-debug}
       ENABLE_DEBUG_ENDPOINTS: ${ENABLE_DEBUG_ENDPOINTS:-true}
 
+      # Integration shape (contract 1.1 / 6.1). The mode decides which routes
+      # exist at all: a receive_* mode registers no read endpoint.
+      INTEGRATION_MODE: ${INTEGRATION_MODE:-query_and_send}
+      ORDER_STATUS_WRITE: ${ORDER_STATUS_WRITE:-false}
+
       # 1. WeAreDA -> Reseller (inbound credential)
       RESELLER_API_KEY: ${RESELLER_API_KEY:-demo_secret}
       RESELLER_AUTH_MODE: ${RESELLER_AUTH_MODE:-api_key}

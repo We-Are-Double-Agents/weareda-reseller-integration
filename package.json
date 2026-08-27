@@ -27,9 +27,12 @@
     "demo:order-status": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts order-status SO-10001 shipped",
     "demo:products": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts product-update --all",
     "demo:invoice": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts invoice SO-10001",
+    "demo:connect": "tsx --disable-warning=ExperimentalWarning src/cli/index.ts integration:connect --mode query_and_send --order-status-write",
     "scenario:order": "tsx --disable-warning=ExperimentalWarning src/scenarios/order.ts",
     "scenario:cancellation": "tsx --disable-warning=ExperimentalWarning src/scenarios/cancellation.ts",
-    "scenario:catalog-push": "tsx --disable-warning=ExperimentalWarning src/scenarios/catalog-push.ts"
+    "scenario:catalog-push": "tsx --disable-warning=ExperimentalWarning src/scenarios/catalog-push.ts",
+    "scenario:integration-modes": "tsx --disable-warning=ExperimentalWarning src/scenarios/integration-modes.ts",
+    "scenario:order-status": "tsx --disable-warning=ExperimentalWarning src/scenarios/order-status.ts"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

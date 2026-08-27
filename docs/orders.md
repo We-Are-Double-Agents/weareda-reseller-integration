@@ -1,9 +1,14 @@
 # Orders
 
-Contract §4.3 (delivery) and §4.4 (cancellation).
+Contract §4.3 (delivery), §4.4 (cancellation) and §6.1 (`order.status`).
 
 > Nothing on this page changes stock. Not delivery, not acceptance, not
 > completion, not cancellation. See [stock.md](stock.md).
+
+> **Orders only reach you at all in an `integrationMode` that delivers them** —
+> `query_and_send` or `receive_and_send`. Under `query_only` / `receive_only`,
+> `ordersWrite` is off in the effective capabilities and nothing is ever queued.
+> See [integration-modes.md](integration-modes.md).
 
 ---
 
@@ -19,6 +24,7 @@ pending  ->  sending  ->  accepted  ->  completed
 | 2 | `sending` | A `POST /orders` attempt is in flight (also the state between retries). |
 | 3 | `accepted` | You answered `2xx`. If your body carried an order id, it is stored as `external_order_id`. **This ends the outbound flow.** |
 | 4 | `completed` | Only later, when you send an `order.status` event whose `state` is `fulfilled` / `completed` / `shipped` / `delivered`. |
+| — | `returned` | You reported `returned` / `refunded` / `not_delivered`: it shipped and came back. **Not** a cancellation. |
 
 Off the happy path: `failed` (retries exhausted), `rejected` / `manual_review`
 (needs a human). Cancellation runs its own arc: `cancel_pending -> cancelled`
@@ -208,24 +214,151 @@ npm run cli -- order-status SO-10001 shipped
 npm run cli -- order-status SO-10001 delivered
 ```
 
-| Your `state` (aliases) | `integration_status` |
-|---|---|
-| `accepted` / `acknowledged` / `ack` | `accepted` |
-| `fulfilled` / `completed` / `shipped` / `delivered` | `completed` |
-| `cancelled` / `canceled` | `cancelled` |
-| `rejected` / `failed` / `error` | `manual_review` |
-| anything else | **not mapped** |
+### The mapping table has two columns
 
-An unmapped state is not an error and not a `manual_review`: the event is parked
-for a human, and the order's `integration_status` is left **exactly as it was**.
-The same applies when the order reference matches nothing. Try it:
+`integration_status` always moves. The **customer-facing** `orders.status` — the
+column the tenant's staff see and edit in the CRM — moves only when the tenant
+registered `orderStatusWrite: true` at connect time
+([integration-modes.md](integration-modes.md#orderstatuswrite)).
+
+| Your `state` (aliases) | → `integration_status` | → `orders.status` *(opt-in only)* |
+|---|---|---|
+| `accepted` / `acknowledged` / `ack` | `accepted` | `confirmed` |
+| `shipped` / `fulfilled` | `completed` | `shipped` |
+| `delivered` / `completed` | `completed` | `delivered` |
+| `cancelled` / `canceled` | `cancelled` | `cancelled` |
+| `returned` / `return` / `refunded` / `not_delivered` / `undelivered` | `returned` | `refunded` |
+| `rejected` / `failed` / `error` | `manual_review` | *(unchanged)* |
+| anything else | **not mapped** | *(unchanged)* |
+
+Three things about that table are worth reading twice.
+
+**`shipped` and `delivered` both collapse to `completed`.** So the customer-facing
+status is derived from the **raw** `state` you sent, never from
+`integration_status` — by the time WeAreDA holds a `completed`, it can no longer
+tell the two apart.
+
+**`fulfilled` maps to `shipped`, not `delivered`.** Deliberately the cheaper wrong
+guess: the ladder below permanently discards a lower rung arriving later, so
+guessing the top rung would throw away your real `delivered` event. Guessing the
+lower one costs nothing — your `delivered` still lands.
+
+**A return is not a cancellation.** `cancelled` means the order never shipped;
+`returned` means it shipped and came back. WeAreDA keeps them apart, and a return
+does **not** trigger a cancellation call back to you.
+
+An unmapped state is not an error and not a `manual_review` on the order: the
+operation is rejected with `unknown_order_state`, the event is parked for a
+human, and the order's `integration_status` is left **exactly as it was**. The
+same applies when the order reference matches nothing (`order_not_found`). Try
+it:
 
 ```bash
 npm run cli -- order-status SO-10001 packed_in_warehouse
 ```
 
-Reaching `completed` does not block later events — a subsequent `cancelled`
-still applies. Re-sending the same state is harmless.
+### Transition rules — these are not obvious
 
-By default this updates only the *integration* status, not the customer-facing
-order status.
+They only apply to the second column, and only under the opt-in.
+
+```
+LADDER      draft → pending → confirmed → processing → shipped → delivered
+            Only ever ADVANCES. A lower rung arriving after a higher one is a
+            late or reordered event and is ignored, not applied.
+
+EXCEPTIONS  cancelled, refunded
+            Apply from ANY rung at ANY time — including after shipped/delivered.
+            An order the customer refused on delivery is an ordinary outcome.
+```
+
+| current | incoming | result |
+|---|---|---|
+| any ladder rung | `cancelled` / `refunded` | applied |
+| lower rung | higher rung | applied |
+| higher rung | lower rung | **ignored** (late/duplicate event) |
+| `cancelled` / `refunded` | any ladder rung | **conflict** — see below |
+
+So you cannot rewind an order by re-sending an older transition, and you cannot
+lose a cancellation by having shipped first.
+
+A fulfilment step reported for an order WeAreDA already holds as
+`cancelled`/`refunded` is a **contradiction between the two systems**, not an
+update: the order is left untouched, its `integration_status` becomes
+`manual_review`, and the operation is rejected with `order_status_conflict`.
+Neither side wins automatically — a human resolves it.
+
+When the status does move, it fires the same downstream effects a manual change
+in the CRM would: alert notifications and conversation-lifecycle automation. The
+two columns move in one atomic write. `shipped_at` / `delivered_at` are filled in
+when blank and **never** overwritten.
+
+### Operation result diagnostics
+
+You see these on the **operation**, not in the webhook response — `202` only says
+the event was queued. The stable `lastErrorCode` is what contract §11.5 exposes
+through the read API's `integration` projection; the `result.detail` strings are
+the human-readable half of the same record.
+
+An `order.status` operation that completes reports why the customer-facing status
+did or did not move, in `integration_operations.result.detail`:
+
+| `detail` | meaning |
+|---|---|
+| `completed; status confirmed→shipped` | moved; alert + lifecycle fired |
+| `completed; status unchanged (status_write_disabled)` | `orderStatusWrite` is off |
+| `completed; status unchanged (unmapped_state)` | the state has no customer-facing meaning (`rejected` / `failed` / `error`) |
+| `completed; status unchanged (already_current)` | the order was already there |
+| `completed; status unchanged (backward)` | late event, discarded by the ladder |
+
+Terminal failures surface instead as `last_error_code`:
+
+| `last_error_code` | cause |
+|---|---|
+| `unknown_order_state` | the `state` is not in the mapping table |
+| `order_not_found` | the `external_order_id` / `order_number` matches no order |
+| `order_status_conflict` | a fulfilment step on an order held as cancelled/refunded |
+| `integration_disabled` | the integration is disconnected or disabled |
+| `read_calls_disabled` | a read was attempted in a `receive_*` mode |
+| `order_delivery_disabled` | an order operation in a `query_only` / `receive_only` mode |
+
+### Worked example — the full sequence
+
+Two sequences, both against `SO-10001`, whose `orders.status` starts at
+`confirmed`. Every request needs its **own** event id.
+
+```json
+{ "type": "order.status", "id": "evt_1", "order": { "external_order_id": "SO-10001", "state": "accepted" } }
+{ "type": "order.status", "id": "evt_2", "order": { "external_order_id": "SO-10001", "state": "shipped" } }
+{ "type": "order.status", "id": "evt_3", "order": { "external_order_id": "SO-10001", "state": "delivered" } }
+```
+
+| event | `integration_status` | `orders.status` (opt-in ON) | `result.detail` |
+|---|---|---|---|
+| `accepted` | `accepted` | confirmed *(unchanged)* | `completed; status unchanged (already_current)` |
+| `shipped` | `completed` | **shipped** | `completed; status confirmed→shipped` |
+| `delivered` | `completed` | **delivered** | `completed; status shipped→delivered` |
+
+With the opt-in **off**, the middle column never moves and all three report
+`completed; status unchanged (status_write_disabled)`.
+
+And an exception applying after shipping:
+
+```json
+{ "type": "order.status", "id": "evt_4", "order": { "external_order_id": "SO-10001", "state": "shipped" } }
+{ "type": "order.status", "id": "evt_5", "order": { "external_order_id": "SO-10001", "state": "returned" } }
+```
+
+| event | `integration_status` | `orders.status` (opt-in ON) | `result.detail` |
+|---|---|---|---|
+| `shipped` | `completed` | **shipped** | `completed; status confirmed→shipped` |
+| `returned` | `returned` | **refunded** | `completed; status shipped→refunded` |
+
+The whole thing, narrated and runnable:
+
+```bash
+npm run scenario:order-status
+npm run cli -- order-status SO-10001 returned --current shipped
+```
+
+Reaching `completed` does not block later events — a subsequent `cancelled` still
+applies. Re-sending the same state is harmless; it reports `already_current`.

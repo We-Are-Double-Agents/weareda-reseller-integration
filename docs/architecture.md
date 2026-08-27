@@ -37,7 +37,7 @@ Every request in this integration belongs to exactly one direction, and the code
 names it everywhere — in module headers, in log blocks, in the docs:
 
 - **WeAreDA -> Reseller** — inbound. `GET /`, `GET /products`, `POST /orders`,
-  the two cancel paths.
+  the two cancel paths. Which of them exist depends on `integrationMode`.
 - **Reseller -> WeAreDA** — outbound. The four webhook event types, plus the
   separate management/read API.
 
@@ -51,7 +51,7 @@ says so.
 | `routes/` | HTTP shape: status codes, validation errors, headers | Thin. No business rules. |
 | `services/` | The actual behaviour: catalog, stock, orders, idempotency | Where the contract rules live. |
 | `storage/` | SQLite schema and access | `node:sqlite`, no native dependencies. |
-| `weareda/` | Everything about the outbound wire format | Types, event builders, signing, read API. |
+| `weareda/` | Everything about the outbound wire format | Types, event builders, signing, read API, and the connect-time integration model. |
 | `cli/`, `scenarios/` | Operator-facing entry points | Thin wrappers over `weareda/` and `services/`. |
 
 The code is deliberately explicit rather than clever. There is no dependency
@@ -60,6 +60,47 @@ developer porting this to PHP, Python, Java or .NET should be able to read a
 file top-to-bottom and translate it.
 
 ## Key design decisions
+
+### The integration mode gates route registration, not request handling
+
+`integrationMode` (contract §1.1) says which of the four calls WeAreDA ever makes
+to a reseller. `server.ts` reads it and **registers only those routes** — a
+`receive_only` sandbox has no `GET /` and no `POST /orders` at all, and answers
+`404` from the not-found handler.
+
+The alternative — registering everything and returning `403 mode_disabled` — was
+rejected because it teaches the wrong thing. The point of `receive_and_send` is
+that a reseller can integrate with **no read endpoint whatsoever**; a sandbox
+that keeps answering `GET /products` cannot demonstrate that. The mode is a
+property of the deployment, so it is applied at wiring time, once, rather than
+re-checked on every request.
+
+The two derived predicates live next to the config that produces them
+(`readCallsEnabled`, `orderDeliveryEnabled` in `config/env.ts`), so no route file
+has to know the mode table.
+
+### The connect body is modelled, and validated locally
+
+`weareda/integration-mode.ts` is the reseller's model of WeAreDA-side rules: the
+mode table, the capability intersection, and `validateConnectBody()`, which
+applies every documented `400` — including the placement traps — **before** the
+request leaves the process. The CLI prints the exact error WeAreDA would return.
+
+That is worth the duplication because the failure it prevents is the silent one:
+unknown keys at the top level of the connect body are dropped without a word, so
+a misplaced `integrationMode` looks exactly like a feature that does not work.
+
+### The order.status decision is one pure function
+
+`resolveOrderStatusTransition()` in `weareda/types.ts` takes the current
+customer-facing status, the raw reseller `state` and the tenant's
+`orderStatusWrite` flag, and returns both columns, the `result.detail` string and
+the `last_error_code`. The ladder, the two exceptions and the conflict rule are
+all in that one function, so the CLI's prediction, the scenario's narration and
+the test suite's assertions cannot disagree with each other.
+
+It is pure and stateless on purpose: the rules are the interesting part, and they
+are readable without a database.
 
 ### One serializer for the catalog
 
@@ -104,6 +145,12 @@ Postgres, Redis or DynamoDB to run.
 Tables: `orders`, `idempotency_records`, `stock_levels`, `inbound_requests`,
 `outbound_events`, `counters`.
 
+Note what is *not* stored: the integration's own configuration. `integrationMode`
+and `orderStatusWrite` live in the environment, because they belong to WeAreDA's
+side of the integration — the sandbox mirrors them so it can behave consistently
+with what was registered, and `npm run cli -- integration:connect` is what
+registers them.
+
 ### The tunnel is not part of the server
 
 `scripts/tunnel.mjs` spawns `cloudflared` and prints a banner. The server has no
@@ -112,9 +159,16 @@ convenience rather than an architectural dependency.
 
 ### The mock receiver is a script, not a service
 
-`scripts/mock-weareda.mjs` imitates the WeAreDA webhook responses so you can
-exercise the outbound direction before you have a connection. It is a
-development aid; nothing in `src/` depends on it.
+`scripts/mock-weareda.mjs` imitates the WeAreDA side — the webhook responses, the
+connect plane (`connect` / `status` / `test-connection`), and the `order.status`
+ladder — so you can exercise the outbound direction before you have a connection.
+It is a development aid; nothing in `src/` depends on it.
+
+It deliberately **duplicates** the rules rather than importing them from `src/`.
+It stands in for the *other* side of the integration, and a stand-in that shares
+its implementation with the thing it is testing proves less. That is why the
+container table, the batch caps and now the mode table and the ladder appear
+twice in this repository.
 
 ## Request lifecycle, inbound
 

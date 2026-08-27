@@ -18,6 +18,7 @@
  * ============================================================================
  */
 import type { AppConfig } from '../config/env.js';
+import type { ConnectBody, IntegrationStatusResponse } from './integration-mode.js';
 
 export interface OrderListFilters {
   status?: string;
@@ -40,7 +41,7 @@ export interface OrderListFilters {
 
 export interface ReadApiResponse<T = unknown> {
   url: string;
-  method: 'GET';
+  method: 'GET' | 'POST';
   statusCode: number;
   statusText: string;
   ok: boolean;
@@ -72,6 +73,58 @@ export class WeAreDAResellerApiClient {
     }
     return { baseUrl, resellerKey, tenantId };
   }
+
+  /* ---------------------------------------------------------------------- */
+  /* Integration configuration (contract 1.1, 2, 6.1)                         */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
+   *
+   * Registers (or re-registers) the integration. `integrationMode` and
+   * `orderStatusWrite` are TOP-LEVEL fields of this body - siblings of
+   * `orderDeliveryStatus`, not members of `declaredCapabilities` or
+   * `syncConfig`.
+   *
+   * Omitting either one on a reconnect leaves the stored value unchanged.
+   *
+   * The response echoes `integrationMode`, `orderDeliveryEnabled` and
+   * `productsSyncMode`, so you can confirm what took effect.
+   */
+  async connect(body: ConnectBody): Promise<ReadApiResponse<IntegrationStatusResponse>> {
+    const { tenantId } = this.requireConfig();
+    return this.post(
+      `/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/integration/connect`,
+      body,
+    ) as Promise<ReadApiResponse<IntegrationStatusResponse>>;
+  }
+
+  /** GET /api/v1/resellers/me/tenants/{tenantId}/integration/status */
+  async integrationStatus(): Promise<ReadApiResponse<IntegrationStatusResponse>> {
+    const { tenantId } = this.requireConfig();
+    return this.get(
+      `/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/integration/status`,
+    ) as Promise<ReadApiResponse<IntegrationStatusResponse>>;
+  }
+
+  /**
+   * POST /api/v1/resellers/me/tenants/{tenantId}/integration/test-connection
+   *
+   * Asks WeAreDA to call your `GET /`. The connection test IS a read, so in an
+   * integrationMode without reads it answers
+   * `422 { reason: "read_calls_disabled" }` without calling anything.
+   */
+  async testConnection(): Promise<ReadApiResponse> {
+    const { tenantId } = this.requireConfig();
+    return this.post(
+      `/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/integration/test-connection`,
+      {},
+    );
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Orders (contract 11)                                                     */
+  /* ---------------------------------------------------------------------- */
 
   /** GET /api/v1/resellers/me/tenants/{tenantId}/orders */
   async listOrders(filters: OrderListFilters = {}): Promise<ReadApiResponse> {
@@ -114,16 +167,32 @@ export class WeAreDAResellerApiClient {
   }
 
   private async get(path: string): Promise<ReadApiResponse> {
+    return this.request('GET', path);
+  }
+
+  private async post(path: string, body: unknown): Promise<ReadApiResponse> {
+    return this.request('POST', path, body);
+  }
+
+  private async request(
+    method: 'GET' | 'POST',
+    path: string,
+    payload?: unknown,
+  ): Promise<ReadApiResponse> {
     const { baseUrl, resellerKey } = this.requireConfig();
     const url = `${baseUrl}${path}`;
 
+    const headers: Record<string, string> = {
+      // The third authentication mechanism of this integration.
+      'X-Reseller-Key': resellerKey,
+      Accept: 'application/json',
+    };
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
+
     const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        // The third authentication mechanism of this integration.
-        'X-Reseller-Key': resellerKey,
-        Accept: 'application/json',
-      },
+      method,
+      headers,
+      body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: AbortSignal.timeout(this.config.webhook.timeoutMs),
     });
 
@@ -137,7 +206,7 @@ export class WeAreDAResellerApiClient {
 
     return {
       url,
-      method: 'GET',
+      method,
       statusCode: response.status,
       statusText: response.statusText,
       ok: response.ok,

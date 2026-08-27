@@ -1,7 +1,7 @@
 # Testing
 
 ```bash
-npm test            # 117 tests, 9 files
+npm test            # 199 tests, 11 files
 npm run test:watch
 npm run typecheck
 npm run lint
@@ -18,14 +18,16 @@ files run in parallel without sharing state.
 | File | Covers |
 |---|---|
 | `tests/auth.test.ts` | Valid / missing / invalid credentials; all four contract mechanisms (`api_key`, `bearer`, `basic`, `custom`); every contract endpoint is protected; the 401 body leaks nothing. |
-| `tests/products.test.ts` | Response shape, variants with attributes, `stock: 0` as a real value, an archived product, pagination (including the short last page that stops WeAreDA, and no repeats across pages), `updated_since` filtering and inclusivity, `updated_at` moving when stock moves. |
+| `tests/products.test.ts` | Response shape, CDN image URLs and the assets behind them, variants with attributes, `stock: 0` as a real value, an archived product, pagination (including the short last page that stops WeAreDA, and no repeats across pages), `updated_since` filtering and inclusivity, `updated_at` moving when stock moves. |
 | `tests/orders.test.ts` | Creation, `201` then `200`, sequential ids from `SO-10001`, payload stored verbatim, idempotency by header and by body key, different keys are different orders, a changed body under the same key still returns the first order, validation failures create nothing. |
 | `tests/cancellation.test.ts` | Per-order path, repeat cancellation, `already_cancelled`, the fallback endpoint matching by `order_number` / `idempotency_key` / `external_order_id`, the `order:` ↔ `order-cancel:` suffix match, `404` for unknown orders and its replay. |
 | **`tests/stock-independence.test.ts`** | **Mandatory.** `POST /orders` does not change stock; neither cancel path does; a full lifecycle leaves stock identical; `GET /products` reports the same before and after; absolute (non-delta) `setStock`; and a structural check that the order files contain no reference to the stock API at all. |
 | `tests/hmac.test.ts` | A known HMAC vector, `sha256=` hex format, sensitivity to body and secret, verification, the re-serialization trap (`1.0` → `1`), event id format and uniqueness, RFC3339 timestamps, one-event-type-per-request enforcement, builder validation. |
 | `tests/webhook-client.test.ts` | Delivery against a real receiver, sent bytes == signed bytes, the three headers, timestamp inside the replay window, `401` on a corrupt signature, `200 {deduped:true}` on a repeated event id, `5xx` retried with the same id and body, `4xx` not retried, batched stock lines, the 500-item and 512 KB caps, dry run, network failure. |
 | `tests/event-history.test.ts` | Inbound and outbound history rows, no credentials or signatures stored, the three debug endpoints, disabling them, the PDF fixture and path-traversal refusal. |
-| `tests/read-api.test.ts` | The `X-Reseller-Key` plane: correct header, explicitly *not* the HMAC or connector key, no `X-Tenant-Id`, cursor pass-through, all four endpoints, `401 invalid_reseller_key`, path encoding, and a clear error when configuration is missing. |
+| `tests/read-api.test.ts` | The `X-Reseller-Key` plane: correct header, explicitly *not* the HMAC or connector key, no `X-Tenant-Id`, cursor pass-through, all four read endpoints, `401 invalid_reseller_key`, path encoding, a clear error when configuration is missing — and the connect plane on the same key: `integration/connect` with both new fields at the top level, `integration/status` echoing the mode, and `422 read_calls_disabled` from `test-connection`. |
+| `tests/integration-mode.test.ts` | The four modes and their two axes; `ordersWrite` switched off without delivery; `productsRead` staying on without reads; capabilities as connector ∩ ceiling ∩ mode, never the declaration; back-compat from `products.mode: "push"`; every documented connect `400` (bad mode, string `"true"`, the cross-field rule, nesting in `declaredCapabilities` / `syncConfig`, contradictory `products.mode`, missing `baseUrl`); unknown top-level keys dropped while unknown `syncConfig` keys are rejected; reconnect leaving stored values alone — and, for each of the four modes, that the sandbox really registers only the routes that mode receives. |
+| `tests/order-status-write.test.ts` | Both mapping columns including the five `returned` aliases; `shipped`/`delivered` collapsing in one column but not the other; `fulfilled → shipped`; the ladder advancing and discarding late rungs; the two exceptions applying from anywhere; `order_status_conflict`; the opt-in off leaving `orders.status` frozen; every `result.detail` string and `last_error_code`; and `shipped_at`/`delivered_at` filled only when blank. |
 
 ## The HMAC test vector
 
@@ -77,6 +79,39 @@ npm run cli -- stock P-1001 37 V-2001 5
 npm run cli -- stock P-1001 37 --event-id evt_x    # then repeat it: 200 deduped
 ```
 
+The mock also serves the connect plane and applies the `order.status` ladder, so
+the whole connect-time contract is testable locally:
+
+```env
+WEAREDA_API_BASE_URL=http://localhost:4000
+WEAREDA_RESELLER_KEY=rsk_example
+WEAREDA_TENANT_ID=tenant_demo
+```
+
+```bash
+npm run cli -- integration:connect --mode query_and_send --order-status-write
+npm run cli -- integration:status
+npm run cli -- integration:test
+
+curl -X POST http://localhost:4000/api/v1/mock/orders \
+  -H 'content-type: application/json' \
+  -d '{"external_order_id":"SO-10001","status":"confirmed"}'
+npm run cli -- order-status SO-10001 shipped
+curl http://localhost:4000/api/v1/mock/operations    # result.detail per operation
+```
+
+## Testing a mode
+
+```bash
+INTEGRATION_MODE=receive_only npm run dev
+curl -i -H "X-API-Key: demo_secret" http://localhost:3000/products   # 404, on purpose
+```
+
+```bash
+npm run scenario:integration-modes   # all four modes, started and called
+npm run scenario:order-status        # the ladder, the exceptions, the conflict
+```
+
 ## Postman / newman
 
 The collection can be run headlessly:
@@ -113,5 +148,7 @@ Folder 09 (the read API) needs real WeAreDA credentials: `wearedaApiBaseUrl`,
 5. Put the returned `webhookUrl` and your `webhookSecret` in `.env`.
 6. Place a test order in WeAreDA that reaches the trigger status, and watch
    `POST /orders` arrive.
-7. Reply with `npm run cli -- order-status <id> shipped`.
+7. Reply with `npm run cli -- order-status <id> shipped`. If the tenant has
+   `orderStatusWrite` on, check that the customer-facing status moved too — and
+   that a second, lower transition afterwards does **not** move it back.
 8. Check `GET /debug/events` for the full record of both directions.

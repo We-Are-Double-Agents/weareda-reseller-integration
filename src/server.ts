@@ -9,13 +9,28 @@
  *   POST /orders/:externalOrderId/cancel    cancellation         (contract 4.4)
  *   POST /orders/cancel                     cancellation fallback(contract 4.4)
  *
+ * WHICH of those exist depends on `integrationMode` (contract 1.1), because the
+ * mode decides which calls WeAreDA ever makes:
+ *
+ *   reads          GET /, GET /products         query_and_send | query_only
+ *   order delivery POST /orders, .../cancel     query_and_send | receive_and_send
+ *
+ * A mode without reads registers no read route at all, so a `receive_only`
+ * reseller genuinely answers 404 rather than merely promising it would. Inbound
+ * webhooks are unaffected: every mode may publish all four event types.
+ *
  * Plus local-only helpers that are NOT part of the contract:
  *   GET  /healthz                           unauthenticated liveness probe
  *   GET  /fixtures/invoices/*.pdf           invoice document for invoice.issued
  *   GET  /debug/{orders,products,events}    JSON inspection
  */
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { AppConfig } from './config/env.js';
+import {
+  orderDeliveryEnabled,
+  publicBaseUrl,
+  readCallsEnabled,
+  type AppConfig,
+} from './config/env.js';
 import { openDatabase, type Database } from './storage/db.js';
 import { EventLog } from './services/event-log.js';
 import { OrderService } from './services/order-service.js';
@@ -51,7 +66,11 @@ export function buildServer(config: AppConfig, options: BuildOptions = {}): Sand
 
   const db = openDatabase(options.databasePath ?? config.databasePath);
   const eventLog = new EventLog(db);
-  const products = new ProductService(db, options.catalogPath ?? 'data/products.json');
+  const products = new ProductService(
+    db,
+    options.catalogPath ?? 'data/products.json',
+    publicBaseUrl(config),
+  );
   const orders = new OrderService(db);
 
   const app = Fastify({
@@ -87,9 +106,23 @@ export function buildServer(config: AppConfig, options: BuildOptions = {}): Sand
     });
   });
 
-  registerHealthRoutes(app, config);
-  registerProductRoutes(app, config, products);
-  registerOrderRoutes(app, config, orders);
+  // `GET /` and `GET /products` are the two READ calls. In receive_and_send /
+  // receive_only they are never called, so they are never registered - and the
+  // connection test, which is itself a read, cannot succeed either.
+  if (readCallsEnabled(config)) {
+    registerProductRoutes(app, config, products);
+  }
+  // registerHealthRoutes always registers the unauthenticated /healthz probe;
+  // the contract's `GET /` is gated on reads.
+  registerHealthRoutes(app, config, { connectionTest: readCallsEnabled(config) });
+
+  // In query_only / receive_only, ordersWrite is off in the effective
+  // capabilities, so an order never enters the delivery queue in the first
+  // place. Nothing is queued and later refused.
+  if (orderDeliveryEnabled(config)) {
+    registerOrderRoutes(app, config, orders);
+  }
+
   registerFixtureRoutes(app);
 
   if (config.enableDebugEndpoints) {

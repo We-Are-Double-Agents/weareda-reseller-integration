@@ -7,14 +7,42 @@ objects. This sandbox implements both, from one serializer
 (`ProductService.serialize()`), because the contract says they are the same
 objects — so the implementation makes it structurally true.
 
-|  | `mode: "pull"` (default) | `mode: "push"` |
+|  | `pull` (`query_and_send`, `query_only`) | `push` (`receive_and_send`, `receive_only`) |
 |---|---|---|
-| `GET /products` | required, called on a schedule | never called — you need not implement it |
+| `GET /products` | required, called on a schedule | **never called** — you need not implement it |
 | `product.updated` | accepted (an accelerator) | accepted (the only catalog source) |
 | Archive-missing sweep | yes, on full/reconciliation pulls | never — use `status: "archived"` |
 | Sync cursor | advances on a successful pull | unused |
+| Sync schedule | created | **not created**, and one left by a previous connect is deleted |
 
-Set the mode with `syncConfig.products.mode` at connect time.
+### You do not set the transport. The mode derives it.
+
+`productsSyncMode` follows from `integrationMode` (contract §1.1) — `pull` for
+`query_*`, `push` for `receive_*` — and it comes back in the connect response.
+
+| What you send at connect time | What happens |
+|---|---|
+| `"integrationMode": "receive_and_send"` | `productsSyncMode: "push"`. This is how you choose push. |
+| nothing | `query_and_send` → `pull` |
+| `productsSyncMode` at the **top level** | **silently dropped.** It is a response field, never an input. |
+| `syncConfig.products.mode` agreeing with the mode | accepted, redundant |
+| `syncConfig.products.mode` contradicting the mode | `400 invalid_sync_config` — not a precedence rule |
+
+```jsonc
+// Push, correctly:
+{ "provider": "generic_http", "baseUrl": "https://…", "integrationMode": "receive_and_send" }
+
+// Push, the way that used to work and now fails:
+{ "provider": "generic_http", "baseUrl": "https://…",
+  "integrationMode": "query_and_send",
+  "syncConfig": { "products": { "mode": "push" } } }   // 400 invalid_sync_config
+```
+
+An integration configured before `integrationMode` existed, carrying
+`products.mode: "push"`, reads as **`receive_and_send`** — reads off, orders
+still delivered. There is nothing to migrate.
+
+Full detail in [integration-modes.md](integration-modes.md).
 
 ---
 
@@ -94,6 +122,47 @@ Anything still mismatched can be remapped with
 
 `data/products.json` deliberately includes both image forms — plain strings and
 `{src}` / `{url}` objects — so you can see that both are accepted.
+
+### Product images
+
+WeAreDA reads image URLs from your catalog and **fetches them itself**, so they
+must be absolute, HTTPS and reachable from the public internet without
+credentials.
+
+The sample catalog points at the WeAreDA demo CDN:
+
+```
+https://cdn.weareda.com/demo/products/toolkit.png
+```
+
+The matching files live in this repository under `fixtures/products/`, and the
+filenames line up one-to-one with that CDN path — those are the assets that
+belong there. A test asserts the two stay in step, so adding a product with a
+CDN image but forgetting to commit the file to upload fails locally rather than
+404ing on the CDN later.
+
+The sandbox also serves them itself:
+
+```
+GET /fixtures/products/toolkit.png
+```
+
+which is the offline route. If you would rather serve the images from your own
+sandbox than from the CDN — no CDN access, or you want to test the fetch against
+a host you control — point the catalog at a **relative** path:
+
+```jsonc
+"images": ["/fixtures/products/toolkit.png"]
+```
+
+The serializer resolves relative paths against `PUBLIC_BASE_URL`, so with
+`npm run tunnel` running the catalog advertises
+`https://<tunnel-host>/fixtures/products/toolkit.png`. Absolute URLs — the
+default — are passed through untouched, which is what a real ERP pointing at its
+own CDN has.
+
+Either way, pull and push share one serializer, so a `product.updated` batch
+carries exactly the same URLs as `GET /products`.
 
 ### `updated_since`
 

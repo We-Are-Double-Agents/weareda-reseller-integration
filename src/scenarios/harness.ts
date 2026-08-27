@@ -9,7 +9,7 @@
  * request log in the other terminal); otherwise the scenario starts one
  * in-process on an ephemeral port.
  */
-import { loadConfig, type AppConfig } from '../config/env.js';
+import { loadConfig, publicBaseUrl, type AppConfig } from '../config/env.js';
 import { buildServer, type SandboxServer } from '../server.js';
 import { WeAreDAWebhookClient } from '../weareda/webhook-client.js';
 import { EventLog } from '../services/event-log.js';
@@ -66,7 +66,7 @@ export async function createScenarioContext(): Promise<ScenarioContext> {
     baseUrl,
     embedded: server !== null,
     webhook: new WeAreDAWebhookClient(config, eventLog),
-    products: new ProductService(db),
+    products: new ProductService(db, 'data/products.json', publicBaseUrl(config)),
     orders: new OrderService(db),
     async callAsWeAreDA(method, path, options = {}) {
       const headers: Record<string, string> = { Accept: 'application/json' };
@@ -94,6 +94,13 @@ export async function createScenarioContext(): Promise<ScenarioContext> {
       if (server) await server.close();
     },
   };
+}
+
+/** The headers WeAreDA would send us, per the configured auth mode. */
+export function inboundAuthHeaders(config: AppConfig): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  applyInboundAuth(headers, config);
+  return headers;
 }
 
 /** Attaches the credentials WeAreDA would send, per the configured auth mode. */

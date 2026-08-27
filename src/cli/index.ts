@@ -19,6 +19,11 @@ import { orderStatusCommand } from './commands/order-status.js';
 import { productUpdateCommand } from './commands/product-update.js';
 import { invoiceCommand } from './commands/invoice.js';
 import {
+  integrationConnectCommand,
+  integrationStatusCommand,
+  integrationTestCommand,
+} from './commands/integration.js';
+import {
   invoiceDocumentCommand,
   ordersGetCommand,
   ordersInvoicesCommand,
@@ -42,8 +47,11 @@ Webhook events (contract 6). One event type per HTTP request, always.
   order-status <orderId> <state>        order.status     (contract 6.1)
         One event per transition, each with its own event id.
         Mapped: accepted|acknowledged|ack, fulfilled|completed|shipped|
-                delivered, cancelled|canceled, rejected|failed|error.
+                delivered, cancelled|canceled, returned|return|refunded|
+                not_delivered|undelivered, rejected|failed|error.
         Any other value is sent as-is, to show the "not mapped" behaviour.
+        With orderStatusWrite enabled the event also moves the CUSTOMER-FACING
+        order status, along a ladder that only ever advances.
           npm run cli -- order-status SO-10001 shipped
 
   product-update <id...> | --all        product.updated  (contract 6.5)
@@ -56,6 +64,21 @@ Webhook events (contract 6). One event type per HTTP request, always.
         document_url must be HTTPS and reachable by WeAreDA - run the tunnel
         and set PUBLIC_BASE_URL first.
           npm run cli -- invoice SO-10001
+
+Integration configuration (contract 1.1, 2, 6.1) - the X-Reseller-Key plane.
+
+  integration:connect [--mode <mode>] [--order-status-write] [--base-url ...]
+        Registers the integration. integrationMode and orderStatusWrite are
+        TOP-LEVEL fields of the connect body, siblings of orderDeliveryStatus.
+        Modes: query_and_send (default) | receive_and_send | query_only |
+               receive_only
+          npm run cli -- integration:connect --mode receive_and_send
+          npm run cli -- integration:connect --mode query_and_send --order-status-write
+  integration:status
+        Echoes integrationMode, orderDeliveryEnabled and productsSyncMode.
+  integration:test
+        Asks WeAreDA to call GET / on us. The connection test IS a read, so a
+        receive_* mode answers 422 read_calls_disabled.
 
 Reseller read API (contract 11) - authenticated with X-Reseller-Key, a
 DIFFERENT mechanism from the webhook HMAC.
@@ -83,6 +106,9 @@ const COMMANDS: Record<string, CommandHandler> = {
   'order-status': orderStatusCommand,
   'product-update': productUpdateCommand,
   invoice: invoiceCommand,
+  'integration:connect': integrationConnectCommand,
+  'integration:status': integrationStatusCommand,
+  'integration:test': integrationTestCommand,
   'orders:list': ordersListCommand,
   'orders:get': ordersGetCommand,
   'orders:invoices': ordersInvoicesCommand,

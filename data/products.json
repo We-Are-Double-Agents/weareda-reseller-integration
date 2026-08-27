@@ -9,7 +9,10 @@
     "currency": "USD",
     "status": "active",
     "stock": 42,
-    "images": ["https://cdn.example.com/products/widget-black-1.jpg", "https://cdn.example.com/products/widget-black-2.jpg"],
+    "images": [
+      "https://cdn.weareda.com/demo/products/widget-black-1.png",
+      "https://cdn.weareda.com/demo/products/widget-black-2.png"
+    ],
     "updated_at": "2026-08-20T09:15:00Z",
     "variants": []
   },
@@ -23,12 +26,44 @@
     "currency": "USD",
     "status": "active",
     "stock": 30,
-    "images": ["https://cdn.example.com/products/widget-pro.jpg"],
+    "images": [
+      "https://cdn.weareda.com/demo/products/widget-pro.png"
+    ],
     "updated_at": "2026-08-22T14:40:00Z",
     "variants": [
-      { "id": "V-2001", "sku": "WIDGET-PRO-S", "name": "Small / Black", "attributes": { "size": "S", "color": "black" }, "price": 8999, "stock": 12 },
-      { "id": "V-2002", "sku": "WIDGET-PRO-M", "name": "Medium / Black", "attributes": { "size": "M", "color": "black" }, "price": 8999, "stock": 18 },
-      { "id": "V-2003", "sku": "WIDGET-PRO-L", "name": "Large / Blue", "attributes": { "size": "L", "color": "blue" }, "price": 9499, "stock": 0 }
+      {
+        "id": "V-2001",
+        "sku": "WIDGET-PRO-S",
+        "name": "Small / Black",
+        "attributes": {
+          "size": "S",
+          "color": "black"
+        },
+        "price": 8999,
+        "stock": 12
+      },
+      {
+        "id": "V-2002",
+        "sku": "WIDGET-PRO-M",
+        "name": "Medium / Black",
+        "attributes": {
+          "size": "M",
+          "color": "black"
+        },
+        "price": 8999,
+        "stock": 18
+      },
+      {
+        "id": "V-2003",
+        "sku": "WIDGET-PRO-L",
+        "name": "Large / Blue",
+        "attributes": {
+          "size": "L",
+          "color": "blue"
+        },
+        "price": 9499,
+        "stock": 0
+      }
     ]
   },
   {
@@ -41,7 +76,9 @@
     "currency": "USD",
     "status": "active",
     "stock": 0,
-    "images": ["https://cdn.example.com/products/gadget-mini.jpg"],
+    "images": [
+      "https://cdn.weareda.com/demo/products/gadget-mini.png"
+    ],
     "updated_at": "2026-08-24T08:00:00Z",
     "variants": []
   },
@@ -69,11 +106,36 @@
     "currency": "USD",
     "status": "active",
     "stock": 7,
-    "images": [{ "src": "https://cdn.example.com/products/bundle-1.jpg" }, { "url": "https://cdn.example.com/products/bundle-2.jpg" }],
+    "images": [
+      {
+        "src": "https://cdn.weareda.com/demo/products/bundle-1.png"
+      },
+      {
+        "url": "https://cdn.weareda.com/demo/products/bundle-2.png"
+      }
+    ],
     "updated_at": "2026-08-25T10:05:00Z",
     "variants": [
-      { "id": "V-2101", "sku": "BUNDLE-STARTER-STD", "name": "Standard", "attributes": { "tier": "standard" }, "price": 12999, "stock": 5 },
-      { "id": "V-2102", "sku": "BUNDLE-STARTER-PLUS", "name": "Plus", "attributes": { "tier": "plus" }, "price": 15999, "stock": 2 }
+      {
+        "id": "V-2101",
+        "sku": "BUNDLE-STARTER-STD",
+        "name": "Standard",
+        "attributes": {
+          "tier": "standard"
+        },
+        "price": 12999,
+        "stock": 5
+      },
+      {
+        "id": "V-2102",
+        "sku": "BUNDLE-STARTER-PLUS",
+        "name": "Plus",
+        "attributes": {
+          "tier": "plus"
+        },
+        "price": 15999,
+        "stock": 2
+      }
     ]
   },
   {
@@ -100,11 +162,31 @@
     "currency": "USD",
     "status": "active",
     "stock": 15,
-    "images": ["https://cdn.example.com/products/toolkit.jpg"],
+    "images": [
+      "https://cdn.weareda.com/demo/products/toolkit.png"
+    ],
     "updated_at": "2026-06-15T16:30:00Z",
     "variants": [
-      { "id": "V-2201", "sku": "TOOLKIT-DLX-EU", "name": "EU plug", "attributes": { "plug": "EU" }, "price": 24999, "stock": 9 },
-      { "id": "V-2202", "sku": "TOOLKIT-DLX-US", "name": "US plug", "attributes": { "plug": "US" }, "price": 24999, "stock": 6 }
+      {
+        "id": "V-2201",
+        "sku": "TOOLKIT-DLX-EU",
+        "name": "EU plug",
+        "attributes": {
+          "plug": "EU"
+        },
+        "price": 24999,
+        "stock": 9
+      },
+      {
+        "id": "V-2202",
+        "sku": "TOOLKIT-DLX-US",
+        "name": "US plug",
+        "attributes": {
+          "plug": "US"
+        },
+        "price": 24999,
+        "stock": 6
+      }
     ]
   },
   {
@@ -117,7 +199,9 @@
     "currency": "USD",
     "status": "active",
     "stock": 64,
-    "images": ["https://cdn.example.com/products/widget-white.jpg"],
+    "images": [
+      "https://cdn.weareda.com/demo/products/widget-white.png"
+    ],
     "updated_at": "2026-08-19T07:45:00Z",
     "variants": []
   }
