@@ -6,7 +6,75 @@ request was going.
 
 ---
 
+## Connect time: registering the integration
+
+### `400 invalid_request` on connect
+
+One of the top-level fields is wrong. In order of how often it happens:
+
+| Message names | Cause | Fix |
+|---|---|---|
+| `orderStatusWrite must be a boolean` | you sent the **string** `"true"` | send a real boolean |
+| `orderStatusWrite requires an integrationMode that delivers orders` | you combined it with `query_only` / `receive_only` | pick `query_and_send` or `receive_and_send`, or drop the flag |
+| `integrationMode must be one of…` | a typo, or a mode that does not exist | `query_and_send` · `receive_and_send` · `query_only` · `receive_only` |
+| `declaredCapabilities.<key> is not a capability` | you nested `integrationMode` / `orderStatusWrite` in there, or invented a capability | move them to the **top level**; the six keys are `productsRead`, `productsWrite`, `stockRead`, `stockWebhooks`, `ordersWrite`, `invoices` |
+| `baseUrl is required` | you left it out of a `receive_only` connect | `receive_only` still registers a `baseUrl`; it is registered, not called |
+
+### `400 invalid_sync_config` on connect
+
+`syncConfig` is a strict whitelist (contract §7), so a typo there fails loudly.
+
+- `syncConfig.integrationMode` / `syncConfig.orderStatusWrite` — both are
+  **top-level** connect fields, siblings of `orderDeliveryStatus`.
+- `syncConfig.products.mode` contradicting the mode — the transport is derived
+  from `integrationMode`, and a contradiction is a `400`, not a precedence rule.
+  Remove `products.mode` and let the mode decide.
+
+### The setting I sent had no effect and no error
+
+Unknown keys at the **top level of the connect body** are dropped in **silence**.
+`productsSyncMode` is the usual victim: it is a *response* field, never an input,
+and sending it does exactly nothing. (Unknown keys inside `syncConfig` are the
+opposite — rejected loudly.)
+
+`npm run cli -- integration:connect` prints a warning naming every top-level key
+WeAreDA would drop, before it sends.
+
+### `422 { "reason": "read_calls_disabled" }` from test-connection
+
+Your `integrationMode` is `receive_and_send` or `receive_only`, which make no
+read calls. **The connection test is itself a read**, so there is nothing for it
+to test — it is refused rather than run against an endpoint nobody calls.
+
+That is not a misconfiguration. If you *want* the test, you want a `query_*`
+mode.
+
+### A reconnect changed a setting I did not send
+
+It should not have — omitting `integrationMode` or `orderStatusWrite` leaves the
+stored value unchanged. If the mode looks wrong on a pre-`integrationMode`
+integration, note the back-compat rule: a stored
+`syncConfig.products.mode = "push"` reads as `receive_and_send`.
+
+---
+
 ## Inbound: WeAreDA -> Reseller
+
+### `404` from your own server for `GET /`, `GET /products` or `POST /orders`
+
+Not a routing bug — check `INTEGRATION_MODE`. This sandbox registers **only** the
+routes its mode receives:
+
+| `INTEGRATION_MODE` | `GET /`, `GET /products` | `POST /orders`, cancel |
+|---|---|---|
+| `query_and_send` (default) | registered | registered |
+| `receive_and_send` | **404** | registered |
+| `query_only` | registered | **404** |
+| `receive_only` | **404** | **404** |
+
+The startup banner lists exactly what exists. `/healthz`, `/fixtures/*` and
+`/debug/*` are local helpers and are present in every mode, as are all four
+outbound webhook types.
 
 ### `401` from your reseller server
 
@@ -30,6 +98,10 @@ Remember `401`/`403` are **not retried**: the operation goes straight to
 *is* retried.
 
 ### WeAreDA cannot reach you at all / connection test times out
+
+First: are you in a mode that reads at all? In `receive_and_send` /
+`receive_only` nothing calls you, and `test-connection` answers
+`422 read_calls_disabled` rather than timing out. Then:
 
 - Is the tunnel running? A quick tunnel URL changes every time `cloudflared`
   restarts, so a URL you registered yesterday is probably dead.
@@ -146,6 +218,13 @@ npm run cli -- order-status SO-10001 shipped     # a different one
 
 Dedup is scoped to connection + event type + event id.
 
+**The version of this that looks like nothing happening at all:** if you send no
+`X-WeAreDA-Event-Id` *and* no `id` in the body, WeAreDA derives the id from a
+**content hash of the raw body**. Two identical payloads therefore have the same
+id, and the second dedups silently — `200 {"deduped": true}`, nothing applied,
+no error anywhere. Give every event its own id; every sender in this repository
+mints a fresh one per send.
+
 ### `400 multiple_event_types`
 
 You sent `order.status` and `stock.updated` (or any two types) in one request,
@@ -193,12 +272,61 @@ If it never applies, the usual causes are:
   against products already mapped to your connection. An unmapped id or an
   ambiguous sku is skipped and counted, and the rest of the event still applies.
   Make sure the ids are the ones you sent in `/products`.
-- **`order.status`**: the `state` is outside the mapping table, or the order
-  reference matched nothing. Both leave `integration_status` untouched and park
-  the event for a human — WeAreDA does not guess.
+- **`order.status`**: the `state` is outside the mapping table
+  (`unknown_order_state`), or the order reference matched nothing
+  (`order_not_found`). Both leave `integration_status` untouched and park the
+  event for a human — WeAreDA does not guess.
 - **`product.updated`**: the product's `updated_at` is older than what WeAreDA
   holds, so it was ignored as stale; or the item had no `id`/`name` and was
   skipped.
+
+### `order.status` applied, but the customer-facing status did not move
+
+That is the default. Without `orderStatusWrite: true` an `order.status` moves
+only `integration_status`; the column the tenant's staff see stays frozen. The
+operation says so in `result.detail`:
+
+| `result.detail` | what to do |
+|---|---|
+| `completed; status unchanged (status_write_disabled)` | the opt-in is off — reconnect with `"orderStatusWrite": true` |
+| `completed; status unchanged (unmapped_state)` | you sent `rejected` / `failed` / `error`; those report an integration failure, not a business state |
+| `completed; status unchanged (already_current)` | the order was already there. Harmless |
+| `completed; status unchanged (backward)` | the ladder only advances, and this rung is below where the order sits — a late or reordered event |
+
+The ladder is `draft → pending → confirmed → processing → shipped → delivered`.
+If you are replaying history, replay it **in order**; anything below the current
+rung is discarded, deliberately.
+
+### `order_status_conflict`
+
+You reported a fulfilment step for an order WeAreDA already holds as `cancelled`
+or `refunded`. That is a contradiction between the two systems, not an update:
+the order is left untouched, its `integration_status` becomes `manual_review`,
+and the operation is rejected. Neither side wins automatically — someone has to
+decide which system is right.
+
+The reverse direction is fine: `cancelled` and `refunded` apply from any rung at
+any time, including after `shipped` or `delivered`.
+
+### `unknown_order_state` for a state I thought was valid
+
+Check the spelling against the aliases, which are wider than people expect:
+
+```
+accepted | acknowledged | ack
+shipped  | fulfilled
+delivered | completed
+cancelled | canceled
+returned | return | refunded | not_delivered | undelivered
+rejected | failed | error
+```
+
+Anything else — `packed_in_warehouse`, `in_transit`, `confirmed` — is not mapped.
+WeAreDA does not guess, and the order is left exactly as it was.
+
+Note `fulfilled` maps to `shipped`, not `delivered`. That is deliberate: the
+ladder would discard a later `delivered` if the top rung had already been
+guessed.
 
 ### The catalog is missing products after a sync
 

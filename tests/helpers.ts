@@ -36,6 +36,13 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       ...(overrides.webhook ?? {}),
     },
     managementApi: { ...base.managementApi, ...(overrides.managementApi ?? {}) },
+    integration: {
+      ...base.integration,
+      // The default shape: WeAreDA reads from us AND delivers orders to us.
+      mode: 'query_and_send',
+      orderStatusWrite: false,
+      ...(overrides.integration ?? {}),
+    },
   };
 }
 

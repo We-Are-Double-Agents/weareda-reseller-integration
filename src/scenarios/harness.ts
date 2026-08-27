@@ -96,6 +96,13 @@ export async function createScenarioContext(): Promise<ScenarioContext> {
   };
 }
 
+/** The headers WeAreDA would send us, per the configured auth mode. */
+export function inboundAuthHeaders(config: AppConfig): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  applyInboundAuth(headers, config);
+  return headers;
+}
+
 /** Attaches the credentials WeAreDA would send, per the configured auth mode. */
 function applyInboundAuth(headers: Record<string, string>, config: AppConfig): void {
   const { mode, apiKey, customHeader, basicUser, basicPassword } = config.inbound;

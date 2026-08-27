@@ -100,9 +100,17 @@ export type WeAreDAEventType =
   'order.status' | 'stock.updated' | 'product.updated' | 'invoice.issued';
 
 /**
- * The `state` values WeAreDA maps (contract 6.1). Anything else is accepted by
- * the transport but "not mapped": the event is parked for a human and the
- * order's integration_status is left exactly as it was.
+ * The `state` values WeAreDA maps (contract 6.1).
+ *
+ * A `state` is mapped in TWO independent columns:
+ *
+ *   1. integration_status - always moved, on every integration.
+ *   2. orders.status      - the CUSTOMER-FACING status, moved only when the
+ *                           tenant opted in with `orderStatusWrite: true`
+ *                           at connect time (see integration-mode.ts).
+ *
+ * Anything outside the table is not mapped at all: the operation is rejected
+ * with `unknown_order_state` and the order is left exactly as it was.
  */
 export const MAPPED_ORDER_STATES = [
   'accepted',
@@ -114,6 +122,11 @@ export const MAPPED_ORDER_STATES = [
   'delivered',
   'cancelled',
   'canceled',
+  'returned',
+  'return',
+  'refunded',
+  'not_delivered',
+  'undelivered',
   'rejected',
   'failed',
   'error',
@@ -121,6 +134,14 @@ export const MAPPED_ORDER_STATES = [
 
 export type MappedOrderState = (typeof MAPPED_ORDER_STATES)[number];
 
+/**
+ * Column 1 - integration_status. Always applied.
+ *
+ * Note that `shipped` and `delivered` COLLAPSE here: both are `completed`.
+ * That is why the customer-facing column below is derived from the RAW state
+ * and never from this value - by the time you have an integration_status you
+ * can no longer tell "shipped" from "delivered".
+ */
 export function mapsToIntegrationStatus(state: string): string | null {
   switch (state) {
     case 'accepted':
@@ -135,6 +156,15 @@ export function mapsToIntegrationStatus(state: string): string | null {
     case 'cancelled':
     case 'canceled':
       return 'cancelled';
+    // A return is NOT a cancellation: `cancelled` means never shipped,
+    // `returned` means shipped and came back. A return never triggers a
+    // cancellation call back to the reseller.
+    case 'returned':
+    case 'return':
+    case 'refunded':
+    case 'not_delivered':
+    case 'undelivered':
+      return 'returned';
     case 'rejected':
     case 'failed':
     case 'error':
@@ -142,6 +172,218 @@ export function mapsToIntegrationStatus(state: string): string | null {
     default:
       return null;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Column 2 - the customer-facing order status (contract 6.1 opt-in)           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The customer-facing ladder. It only ever ADVANCES: a lower rung arriving
+ * after a higher one is a late or reordered event and is ignored, not applied.
+ */
+export const ORDER_STATUS_LADDER = [
+  'draft',
+  'pending',
+  'confirmed',
+  'processing',
+  'shipped',
+  'delivered',
+] as const;
+
+/**
+ * The two exceptions to the ladder. They apply from ANY rung at ANY time,
+ * including after shipped/delivered - an order the customer refused on
+ * delivery is an ordinary outcome, not an anomaly.
+ */
+export const ORDER_STATUS_EXCEPTIONS = ['cancelled', 'refunded'] as const;
+
+export type OrderLadderStatus = (typeof ORDER_STATUS_LADDER)[number];
+export type OrderExceptionStatus = (typeof ORDER_STATUS_EXCEPTIONS)[number];
+export type CustomerOrderStatus = OrderLadderStatus | OrderExceptionStatus;
+
+/**
+ * Column 2 - orders.status, derived from the RAW reseller state.
+ *
+ * `null` means "this state does not move the customer-facing status", which is
+ * not the same as "unknown state": `rejected` / `failed` / `error` are mapped
+ * (to integration_status manual_review) and deliberately leave orders.status
+ * alone.
+ *
+ * Two mappings worth knowing by heart:
+ *   - `fulfilled` -> `shipped`, NOT `delivered`. Deliberately the cheaper wrong
+ *     guess: the ladder discards a lower rung arriving later, so guessing the
+ *     top rung would permanently throw away the real `delivered` event.
+ *   - `returned` and friends -> `refunded`, never `cancelled`.
+ */
+export function mapsToOrderStatus(state: string): CustomerOrderStatus | null {
+  switch (state) {
+    case 'accepted':
+    case 'acknowledged':
+    case 'ack':
+      return 'confirmed';
+    case 'shipped':
+    case 'fulfilled':
+      return 'shipped';
+    case 'delivered':
+    case 'completed':
+      return 'delivered';
+    case 'cancelled':
+    case 'canceled':
+      return 'cancelled';
+    case 'returned':
+    case 'return':
+    case 'refunded':
+    case 'not_delivered':
+    case 'undelivered':
+      return 'refunded';
+    default:
+      // Includes rejected | failed | error (mapped, but no status effect) and
+      // every unmapped value.
+      return null;
+  }
+}
+
+/** Rung index on the ladder, or -1 for a status that is not on it. */
+export function ladderRank(status: string): number {
+  return (ORDER_STATUS_LADDER as readonly string[]).indexOf(status);
+}
+
+export function isExceptionStatus(status: string): status is OrderExceptionStatus {
+  return (ORDER_STATUS_EXCEPTIONS as readonly string[]).includes(status);
+}
+
+/** Terminal failures reported as integration_operations.last_error_code. */
+export const OPERATION_ERROR_CODES = [
+  'unknown_order_state',
+  'order_not_found',
+  'order_status_conflict',
+  'integration_disabled',
+  'read_calls_disabled',
+  'order_delivery_disabled',
+] as const;
+
+export type OperationErrorCode = (typeof OPERATION_ERROR_CODES)[number];
+
+/** Why the customer-facing status did or did not move. */
+export type OrderStatusReason =
+  | 'moved'
+  | 'status_write_disabled'
+  | 'unmapped_state'
+  | 'already_current'
+  | 'backward'
+  | 'conflict'
+  | 'unknown_state';
+
+export interface OrderStatusTransition {
+  /** `applied` and `unchanged` complete; `rejected` is a terminal failure. */
+  outcome: 'applied' | 'unchanged' | 'rejected';
+  /** integration_status to write. `null` only when the state is unknown. */
+  integrationStatus: string | null;
+  /** orders.status to write, or `null` when nothing is written. */
+  orderStatus: CustomerOrderStatus | null;
+  reason: OrderStatusReason;
+  /** integration_operations.result.detail */
+  detail: string;
+  /** integration_operations.last_error_code, or `null` when the op completed. */
+  errorCode: OperationErrorCode | null;
+  /**
+   * Timestamp column to fill IF IT IS STILL BLANK. Never overwritten: the
+   * first `shipped` wins, and a redelivery does not move the date.
+   */
+  fillTimestamp: 'shipped_at' | 'delivered_at' | null;
+}
+
+/**
+ * The whole of contract 6.1's decision, in one pure function.
+ *
+ *   LADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered
+ *               Only ever ADVANCES.
+ *   EXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.
+ *
+ * A fulfilment step reported for an order WeAreDA already holds as
+ * cancelled/refunded is a contradiction between the two systems, not an
+ * update: the order is left untouched, integration_status becomes
+ * `manual_review`, and the operation is rejected with `order_status_conflict`.
+ * Neither side wins automatically.
+ *
+ * Conflict detection is part of the status-write path, so it only applies when
+ * the tenant opted in. With `orderStatusWrite: false` WeAreDA never consults
+ * orders.status, so it has no contradiction to notice - that is the pre-opt-in
+ * behaviour, unchanged.
+ */
+export function resolveOrderStatusTransition(input: {
+  /** The order's current customer-facing status. */
+  currentStatus: string;
+  /** The RAW `state` from the reseller's order.status event. */
+  state: string;
+  /** The tenant's `orderStatusWrite` setting. */
+  orderStatusWrite: boolean;
+}): OrderStatusTransition {
+  const integrationStatus = mapsToIntegrationStatus(input.state);
+
+  // Not in the table at all: nothing is applied, in either column.
+  if (integrationStatus === null) {
+    return {
+      outcome: 'rejected',
+      integrationStatus: null,
+      orderStatus: null,
+      reason: 'unknown_state',
+      detail: 'rejected; unknown_order_state',
+      errorCode: 'unknown_order_state',
+      fillTimestamp: null,
+    };
+  }
+
+  const unchanged = (reason: OrderStatusReason): OrderStatusTransition => ({
+    outcome: 'unchanged',
+    integrationStatus,
+    orderStatus: null,
+    reason,
+    detail: `completed; status unchanged (${reason})`,
+    errorCode: null,
+    fillTimestamp: null,
+  });
+
+  if (!input.orderStatusWrite) return unchanged('status_write_disabled');
+
+  const target = mapsToOrderStatus(input.state);
+  // Mapped for integration_status, but with no customer-facing meaning:
+  // rejected | failed | error.
+  if (target === null) return unchanged('unmapped_state');
+
+  if (target === input.currentStatus) return unchanged('already_current');
+
+  const applied = (): OrderStatusTransition => ({
+    outcome: 'applied',
+    integrationStatus,
+    orderStatus: target,
+    reason: 'moved',
+    detail: `completed; status ${input.currentStatus}→${target}`,
+    errorCode: null,
+    fillTimestamp:
+      target === 'shipped' ? 'shipped_at' : target === 'delivered' ? 'delivered_at' : null,
+  });
+
+  // Exceptions ignore the ladder entirely, in both directions of time.
+  if (isExceptionStatus(target)) return applied();
+
+  if (isExceptionStatus(input.currentStatus)) {
+    return {
+      outcome: 'rejected',
+      // The order itself is left untouched; only the integration side moves.
+      integrationStatus: 'manual_review',
+      orderStatus: null,
+      reason: 'conflict',
+      detail: 'rejected; order_status_conflict',
+      errorCode: 'order_status_conflict',
+      fillTimestamp: null,
+    };
+  }
+
+  // Both on the ladder: advance only. An unknown current status ranks below
+  // `draft`, so any rung advances it.
+  return ladderRank(target) > ladderRank(input.currentStatus) ? applied() : unchanged('backward');
 }
 
 export interface OrderStatusEvent {

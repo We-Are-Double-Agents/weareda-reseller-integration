@@ -18,6 +18,8 @@ const TENANT_ID = 'TENANT_ID';
 
 interface Call {
   url: string;
+  method: string;
+  body?: unknown;
   resellerKey: string | undefined;
   signature: string | undefined;
   apiKey: string | undefined;
@@ -35,6 +37,7 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
     backend.addHook('onRequest', async (request, reply) => {
       calls.push({
         url: request.url,
+        method: request.method,
         resellerKey: request.headers['x-reseller-key'] as string | undefined,
         signature: request.headers['x-weareda-signature'] as string | undefined,
         apiKey: request.headers['x-api-key'] as string | undefined,
@@ -44,6 +47,38 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
         return reply.code(401).send({ reason: 'invalid_reseller_key' });
       }
     });
+
+    // Contract 2 - the integration configuration endpoints, on the same
+    // X-Reseller-Key plane as the read API.
+    backend.post('/api/v1/resellers/me/tenants/:tenantId/integration/connect', async (request) => {
+      const body = request.body as Record<string, unknown>;
+      calls[calls.length - 1]!.body = body;
+      const mode = (body.integrationMode as string) ?? 'query_and_send';
+      return {
+        status: 'connected',
+        integrationMode: mode,
+        orderDeliveryEnabled: mode === 'query_and_send' || mode === 'receive_and_send',
+        productsSyncMode: mode.startsWith('query') ? 'pull' : 'push',
+        orderStatusWrite: body.orderStatusWrite === true,
+      };
+    });
+
+    backend.get('/api/v1/resellers/me/tenants/:tenantId/integration/status', async () => ({
+      status: 'connected',
+      integrationMode: 'receive_and_send',
+      orderDeliveryEnabled: true,
+      productsSyncMode: 'push',
+      orderStatusWrite: false,
+    }));
+
+    backend.post(
+      '/api/v1/resellers/me/tenants/:tenantId/integration/test-connection',
+      async (_request, reply) =>
+        // The connection test IS a read, and this integration makes none.
+        reply
+          .code(422)
+          .send({ error: 'test_connection_unavailable', reason: 'read_calls_disabled' }),
+    );
 
     backend.get('/api/v1/resellers/me/tenants/:tenantId/orders', async () => ({
       items: [
@@ -98,6 +133,52 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
       } as never),
     );
   }
+
+  it('registers the integration with the two new fields at the TOP LEVEL', async () => {
+    const response = await client().connect({
+      provider: 'generic_http',
+      baseUrl: 'https://api.your-erp.com/v1',
+      orderDeliveryStatus: 'confirmed',
+      integrationMode: 'receive_and_send',
+      orderStatusWrite: true,
+    });
+
+    expect(response.method).toBe('POST');
+    expect(calls[0]?.url).toContain('/tenants/TENANT_ID/integration/connect');
+    // Same plane as the read API: X-Reseller-Key, never the webhook HMAC.
+    expect(calls[0]?.resellerKey).toBe(RESELLER_KEY);
+    expect(calls[0]?.signature).toBeUndefined();
+
+    const sent = calls[0]?.body as Record<string, unknown>;
+    expect(sent.integrationMode).toBe('receive_and_send');
+    expect(sent.orderStatusWrite).toBe(true);
+    // NOT nested anywhere.
+    expect(sent.declaredCapabilities).toBeUndefined();
+    expect(sent.syncConfig).toBeUndefined();
+
+    expect(response.body).toMatchObject({
+      integrationMode: 'receive_and_send',
+      orderDeliveryEnabled: true,
+      productsSyncMode: 'push',
+      orderStatusWrite: true,
+    });
+  });
+
+  it('echoes the mode from GET .../integration/status', async () => {
+    const response = await client().integrationStatus();
+    expect(calls[0]?.method).toBe('GET');
+    expect(response.body).toMatchObject({
+      integrationMode: 'receive_and_send',
+      orderDeliveryEnabled: true,
+      productsSyncMode: 'push',
+    });
+  });
+
+  it('gets 422 read_calls_disabled from test-connection when the mode makes no reads', async () => {
+    const response = await client().testConnection();
+    expect(response.statusCode).toBe(422);
+    expect((response.body as any).reason).toBe('read_calls_disabled');
+  });
 
   it('lists tenant orders', async () => {
     const response = await client().listOrders({ status: 'confirmed', limit: 25 });

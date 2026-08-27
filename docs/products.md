@@ -7,14 +7,42 @@ objects. This sandbox implements both, from one serializer
 (`ProductService.serialize()`), because the contract says they are the same
 objects — so the implementation makes it structurally true.
 
-|  | `mode: "pull"` (default) | `mode: "push"` |
+|  | `pull` (`query_and_send`, `query_only`) | `push` (`receive_and_send`, `receive_only`) |
 |---|---|---|
-| `GET /products` | required, called on a schedule | never called — you need not implement it |
+| `GET /products` | required, called on a schedule | **never called** — you need not implement it |
 | `product.updated` | accepted (an accelerator) | accepted (the only catalog source) |
 | Archive-missing sweep | yes, on full/reconciliation pulls | never — use `status: "archived"` |
 | Sync cursor | advances on a successful pull | unused |
+| Sync schedule | created | **not created**, and one left by a previous connect is deleted |
 
-Set the mode with `syncConfig.products.mode` at connect time.
+### You do not set the transport. The mode derives it.
+
+`productsSyncMode` follows from `integrationMode` (contract §1.1) — `pull` for
+`query_*`, `push` for `receive_*` — and it comes back in the connect response.
+
+| What you send at connect time | What happens |
+|---|---|
+| `"integrationMode": "receive_and_send"` | `productsSyncMode: "push"`. This is how you choose push. |
+| nothing | `query_and_send` → `pull` |
+| `productsSyncMode` at the **top level** | **silently dropped.** It is a response field, never an input. |
+| `syncConfig.products.mode` agreeing with the mode | accepted, redundant |
+| `syncConfig.products.mode` contradicting the mode | `400 invalid_sync_config` — not a precedence rule |
+
+```jsonc
+// Push, correctly:
+{ "provider": "generic_http", "baseUrl": "https://…", "integrationMode": "receive_and_send" }
+
+// Push, the way that used to work and now fails:
+{ "provider": "generic_http", "baseUrl": "https://…",
+  "integrationMode": "query_and_send",
+  "syncConfig": { "products": { "mode": "push" } } }   // 400 invalid_sync_config
+```
+
+An integration configured before `integrationMode` existed, carrying
+`products.mode: "push"`, reads as **`receive_and_send`** — reads off, orders
+still delivered. There is nothing to migrate.
+
+Full detail in [integration-modes.md](integration-modes.md).
 
 ---
 

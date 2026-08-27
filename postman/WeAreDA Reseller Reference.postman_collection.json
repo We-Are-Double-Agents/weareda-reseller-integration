@@ -2,10 +2,853 @@
   "info": {
     "_postman_id": "8f2a5c10-1d3e-4a7b-9c62-weareda000001",
     "name": "WeAreDA Reseller Reference",
-    "description": "Every request in the WeAreDA reseller integration, in both directions.\n\n    WeAreDA -> Reseller   folders 01-04 and parts of 10\n                          calls INTO your commerce/ERP system\n                          auth: X-API-Key (or bearer / basic / custom)\n\n    Reseller -> WeAreDA   folders 05-08 and parts of 10\n                          the signed webhook you call\n                          auth: HMAC-SHA256 over the exact raw body\n\n    Reseller -> WeAreDA   folder 09\n    (management API)      the read API on WeAreDA's backend\n                          auth: X-Reseller-Key\n\nTHREE DIFFERENT CREDENTIALS. They are not interchangeable.\n\nWebhook requests sign themselves: a pre-request script builds the event,\nserializes it ONCE, signs those exact bytes and sets X-WeAreDA-Signature,\nX-WeAreDA-Event-Id and X-WeAreDA-Timestamp. The request body is the same\nstring that was signed.\n\nSuggested order: 01 -> 02 -> 03 (captures orderId) -> 05/07/08 -> 04.\n\nRemember while you test: orders and stock are independent flows. Nothing in\nfolders 03 or 04 changes stock anywhere, on either side.",
+    "description": "Every request in the WeAreDA reseller integration, in both directions.\n\n    WeAreDA -> Reseller   folders 01-04 and parts of 10\n                          calls INTO your commerce/ERP system\n                          auth: X-API-Key (or bearer / basic / custom)\n\n    Reseller -> WeAreDA   folders 05-08 and parts of 10\n                          the signed webhook you call\n                          auth: HMAC-SHA256 over the exact raw body\n\n    Reseller -> WeAreDA   folders 00 and 09\n    (management API)      the connect API and the read API on WeAreDA's\n                          backend\n                          auth: X-Reseller-Key\n\nTHREE DIFFERENT CREDENTIALS. They are not interchangeable.\n\nWebhook requests sign themselves: a pre-request script builds the event,\nserializes it ONCE, signs those exact bytes and sets X-WeAreDA-Signature,\nX-WeAreDA-Event-Id and X-WeAreDA-Timestamp. The request body is the same\nstring that was signed.\n\nFolder 00 registers the integration. integrationMode decides which of folders\n01-04 apply to you at all - a receive_only reseller implements none of them and\nstill works, publishing through folders 05-08. Inbound webhooks work in every\nmode.\n\nSuggested order: 00 -> 01 -> 02 -> 03 (captures orderId) -> 05/07/08 -> 04.\n\nRemember while you test: orders and stock are independent flows. Nothing in\nfolders 03 or 04 changes stock anywhere, on either side.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
+    {
+      "name": "00 - Integration Configuration",
+      "description": "Direction: Reseller -> WeAreDA management API (X-Reseller-Key), contract 1.1, 2 and 6.1.\n\nintegrationMode and orderStatusWrite are TOP-LEVEL fields of the connect body,\nsiblings of orderDeliveryStatus. Inside declaredCapabilities they are\n400 invalid_request; inside syncConfig, 400 invalid_sync_config.\n\n    integrationMode    reads  order delivery  catalog\n    query_and_send     yes    yes             pull      (default)\n    receive_and_send   NO     yes             push\n    query_only         yes    NO              pull\n    receive_only       NO     NO              push\n\nInbound webhooks (folders 05-08) work in EVERY mode. The mode governs only\nwhat WeAreDA does.\n\nPoint wearedaApiBaseUrl at `npm run mock:weareda` (http://localhost:4000) to\nrun this folder without a real WeAreDA connection.",
+      "item": [
+        {
+          "name": "connect - query_and_send (default)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "The default shape: WeAreDA reads your catalog on a schedule AND delivers orders to you.\n\nYou implement all four calls: GET /, GET /products, POST /orders, POST /orders/{id}/cancel.\n\nThe response echoes integrationMode, orderDeliveryEnabled and productsSyncMode, and captures webhookUrl into the collection variable used by folders 05-08."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('query_and_send');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
+                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "connect - receive_and_send (no read endpoint, orders still arrive)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"receive_and_send\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "Reads OFF, order delivery ON.\n\nWeAreDA never calls GET / or GET /products; your catalog arrives as product.updated webhooks (folder 06). Orders are still DELIVERED - delivering an order is a send, not a query.\n\nNo sync schedule is created, and any schedule left by a previous connect is deleted."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('receive_and_send');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
+                  "    pm.expect(b.productsSyncMode).to.eql('push');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "connect - query_only (read from, never sent an order)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_only\",\n  \"orderStatusWrite\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "Reads ON, order delivery OFF.\n\nordersWrite is switched off in the effective capabilities, so orders never enter the delivery queue at all. Nothing is queued and later refused.\n\nNote the explicit \"orderStatusWrite\": false. Omitting a field on a reconnect leaves the STORED value unchanged - so if this tenant already had the opt-in on, moving it to a mode that delivers no orders must turn the flag off in the same call, or the connect is refused with 400 invalid_request."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('query_only');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(false);",
+                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}",
+                  "pm.test('ordersWrite is off in the effective capabilities', function () {",
+                  "    pm.expect(pm.response.json().effectiveCapabilities.ordersWrite).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "connect - receive_only (publish only, baseUrl still required)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"receive_only\",\n  \"orderStatusWrite\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "Nothing is ever called on your side. You only publish webhooks.\n\nA baseUrl is STILL required at connect time - it is registered, not called. Omitting it is 400 invalid_request.\n\nNote the explicit \"orderStatusWrite\": false. Omitting a field on a reconnect leaves the STORED value unchanged - so if this tenant already had the opt-in on, moving it to a mode that delivers no orders must turn the flag off in the same call, or the connect is refused with 400 invalid_request."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('receive_only');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(false);",
+                  "    pm.expect(b.productsSyncMode).to.eql('push');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "connect - with orderStatusWrite: true",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"orderStatusWrite\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "Opt in to letting an inbound order.status move the CUSTOMER-FACING orders.status, not just integration_status (contract 6.1).\n\nStrict boolean. Per TENANT, unlike integrationMode which is per reseller.\n\nWith this on, a status move fires the same alerts and conversation-lifecycle automation a manual change in the CRM fires, and shipped_at / delivered_at are filled in when blank."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('query_and_send');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
+                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}",
+                  "pm.test('orderStatusWrite is on', function () {",
+                  "    pm.expect(pm.response.json().orderStatusWrite).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET integration status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/status",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "status"
+              ]
+            },
+            "description": "Echoes integrationMode, orderDeliveryEnabled, productsSyncMode and orderStatusWrite, plus the validated syncConfig that was stored.\n\nsyncSchedule is null in a mode that does not read."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the three derived fields', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b).to.have.property('integrationMode');",
+                  "    pm.expect(b).to.have.property('orderDeliveryEnabled');",
+                  "    pm.expect(b).to.have.property('productsSyncMode');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST test-connection (422 read_calls_disabled in a receive_* mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/test-connection",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "test-connection"
+              ]
+            },
+            "description": "Asks WeAreDA to call GET / on your baseUrl.\n\nTHE CONNECTION TEST IS A READ. Run this after connecting in receive_and_send or receive_only and it answers 422 { reason: 'read_calls_disabled' } without calling anything - there is nothing for it to test.\n\nAfter a query_* connect it actually calls you: watch the GET / arrive in your sandbox log."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 after a query_* connect, 422 after a receive_* one', function () {",
+                  "    pm.expect([200, 422, 502]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 422) {",
+                  "    pm.test('reason names the mode, not a network problem', function () {",
+                  "        pm.expect(pm.response.json().reason).to.eql('read_calls_disabled');",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 invalid_request - orderStatusWrite on a mode without order delivery",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_only\",\n  \"orderStatusWrite\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "The one combination that is refused:\n\n  orderStatusWrite requires an integrationMode that delivers orders -\n  'query_only' never sends this reseller an order to report a status on\n\nThe two settings are otherwise independent: integrationMode is per reseller and describes topology; orderStatusWrite is per tenant and is a question of data authority."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_request', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 invalid_request - orderStatusWrite as the string \"true\"",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"orderStatusWrite\": \"true\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "orderStatusWrite must be a REAL boolean. The string \"true\" is a 400, not a truthy value."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_request', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 invalid_request - integrationMode inside declaredCapabilities",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"declaredCapabilities\": {\n    \"integrationMode\": \"query_only\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "WRONG PLACE. integrationMode is a TOP-LEVEL field, a sibling of orderDeliveryStatus.\n\ndeclaredCapabilities accepts only six boolean keys - productsRead, productsWrite, stockRead, stockWebhooks, ordersWrite, invoices - and it is METADATA ONLY. Effective capabilities are connector support n platform ceiling n mode; your declaration is not an input and enables nothing."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_request', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 invalid_sync_config - orderStatusWrite inside syncConfig",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"syncConfig\": {\n    \"orderStatusWrite\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "WRONG PLACE, and a different error code than the declaredCapabilities mistake.\n\nUnknown keys INSIDE syncConfig are rejected loudly (contract 7). Unknown keys at the TOP LEVEL of the body are dropped in silence - see the next request."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_sync_config', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_sync_config');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 invalid_sync_config - products.mode contradicting the mode",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"products\": {\n      \"mode\": \"push\"\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "The mode DERIVES the catalog transport: pull for query_*, push for receive_*.\n\nSetting a contradictory products.mode is a 400, not a precedence rule. To push, choose receive_and_send or receive_only - do not fight the derivation."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_sync_config', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_sync_config');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "200 but silently ignored - productsSyncMode at the top level",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"productsSyncMode\": \"push\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "THE SILENT ONE. productsSyncMode is a RESPONSE field, never an input.\n\nSent at the top level of the connect body it is dropped without a word: 200, no error, and productsSyncMode in the response is still 'pull'. This is the failure that looks exactly like a feature that does not work.\n\nUnknown keys inside syncConfig are the opposite - rejected loudly."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('query_and_send');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
+                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}",
+                  "pm.test('the input was dropped without a word', function () {",
+                  "    pm.expect(pm.response.json().productsSyncMode).to.eql('pull');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
     {
       "name": "01 - Connection Test",
       "description": "GET / - contract 4.1. WeAreDA calls your base URL with the registered credentials. Any 2xx passes.",
@@ -712,7 +1555,7 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
           },
           "response": []
         },
@@ -799,7 +1642,7 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
           },
           "response": []
         },
@@ -886,7 +1729,7 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
           },
           "response": []
         },
@@ -973,7 +1816,261 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - returned (NEW: a return is not a cancellation)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'returned' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered.\n\nThis request: `returned`.\n\nintegration_status -> returned (a value that did not exist before), and with the\nopt-in on, orders.status -> refunded. NOT cancelled: `cancelled` means the order\nnever shipped, `returned` means it shipped and came back.\n\nA return does NOT trigger a cancellation call back to you (folder 04)."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - refunded after delivery (an exception ignoring the ladder)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'refunded' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted (queued) or 200 deduped', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "pm.test('response names the operation', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body).to.have.property('operationId');",
+                  "});",
+                  "if (pm.response.code === 200 && pm.response.json().deduped) {",
+                  "    console.log('Deduped: this event id was already processed (contract 6.0).');",
+                  "}",
+                  "if (pm.response.code === 202) {",
+                  "    console.log('202 means QUEUED, not applied. Effects land shortly after (contract 6.0).');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered.\n\nThis request: `refunded`, deliberately sent AFTER delivered.\n\nThe ladder only advances, so a late `accepted` would be discarded - but cancelled\nand refunded are exceptions and apply from any rung at any time. A customer who\nrefuses the parcel on delivery is an ordinary outcome, not a stale event.\n\nRun order.status - shipped, then - delivered, then this one."
+          },
+          "response": []
+        },
+        {
+          "name": "order.status - a fulfilment step after cancellation (order_status_conflict)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// ---------------------------------------------------------------------------",
+                  "// Reseller -> WeAreDA webhook signing (contract 3.2)",
+                  "//",
+                  "// The signature is HMAC-SHA256 over the EXACT RAW BODY BYTES that are sent.",
+                  "// So we build the event, serialize it ONCE into `signedBody`, sign THAT",
+                  "// string, and let the request body be exactly {{signedBody}}.",
+                  "//",
+                  "// Never re-stringify after signing - different bytes mean 401 unauthorized.",
+                  "// ---------------------------------------------------------------------------",
+                  "const secret = pm.environment.get('webhookSecret') || pm.collectionVariables.get('webhookSecret');",
+                  "if (!secret) {",
+                  "    console.warn('webhookSecret is not set - WeAreDA will answer 401 unauthorized.');",
+                  "}",
+                  "",
+                  "const eventId = 'evt_' + Array.from({ length: 32 }, () =>",
+                  "    Math.floor(Math.random() * 16).toString(16)).join('');",
+                  "",
+                  "const event = { type: 'order.status', id: eventId, order: { external_order_id: pm.collectionVariables.get('orderId') || pm.environment.get('orderId'), state: 'shipped' } };",
+                  "",
+                  "// Serialize once. This exact string is what gets signed AND sent.",
+                  "const signedBody = JSON.stringify(event);",
+                  "pm.variables.set('signedBody', signedBody);",
+                  "",
+                  "const signature = CryptoJS.HmacSHA256(signedBody, secret || '').toString(CryptoJS.enc.Hex);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Signature', value: 'sha256=' + signature });",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Event-Id', value: eventId });",
+                  "// Optional per contract 3.2; must be within the +/-5 minute replay window.",
+                  "pm.request.headers.upsert({ key: 'X-WeAreDA-Timestamp', value: String(Math.floor(Date.now() / 1000)) });",
+                  "",
+                  "pm.collectionVariables.set('lastEventId', eventId);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202: the TRANSPORT accepted it', function () {",
+                  "    pm.expect([200, 202]).to.include(pm.response.code);",
+                  "});",
+                  "console.log('202 is the transport, not the outcome. If the order was already');",
+                  "console.log('cancelled, the OPERATION is rejected with order_status_conflict and');",
+                  "console.log('the order is left untouched. Check the operation, not this response.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{{signedBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{wearedaWebhookUrl}}",
+              "host": [
+                "{{wearedaWebhookUrl}}"
+              ]
+            },
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered.\n\nThis request: `shipped`, sent AFTER `cancelled`.\n\nRun order.status - cancelled first, then this one.\n\nWeAreDA already holds the order as cancelled, so a fulfilment step is a\nCONTRADICTION between the two systems, not an update: the order is left untouched,\nits integration_status becomes manual_review, and the operation is rejected with\nlast_error_code: order_status_conflict. Neither side wins automatically.\n\nNote the transport still answers 202 - the rejection happens in the queue, on the\noperation, not on the HTTP request."
           },
           "response": []
         },
@@ -1060,7 +2157,7 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nstate -> integration_status:\n  accepted | acknowledged | ack               -> accepted\n  fulfilled | completed | shipped | delivered -> completed\n  cancelled | canceled                        -> cancelled\n  rejected | failed | error                   -> manual_review\n  anything else                               -> NOT MAPPED (parked for a human,\n                                                 order left untouched)\n\nThis event NEVER changes stock - not even shipped or delivered.\n\nThis one sends a state outside the mapping table on purpose. WeAreDA parks the event for a human and leaves integration_status exactly as it was - it does NOT fall back to manual_review."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
           },
           "response": []
         },
@@ -1147,7 +2244,7 @@
                 "{{wearedaWebhookUrl}}"
               ]
             },
-            "description": "Direction: Reseller -> WeAreDA.\n\nWhen WeAreDA holds no external_order_id for the order, reference it by order_number (contract 6.1)."
+            "description": "Direction: Reseller -> WeAreDA.\n\norder.status (contract 6.1). ONE event per transition, each with its own event id.\n\nTWO columns. integration_status always moves; orders.status - the customer-facing\none - moves only when the tenant registered orderStatusWrite: true (folder 00).\n\n  state                                    integration_status  orders.status\n  ------------------------------------------------------------------------------\n  accepted | acknowledged | ack            accepted            confirmed\n  shipped | fulfilled                      completed           shipped\n  delivered | completed                    completed           delivered\n  cancelled | canceled                     cancelled           cancelled\n  returned | return | refunded |\n    not_delivered | undelivered            returned            refunded\n  rejected | failed | error                manual_review       (unchanged)\n  anything else                            NOT MAPPED          (unchanged)\n\nshipped and delivered COLLAPSE to completed, so orders.status is derived from the\nRAW state, never from integration_status. fulfilled maps to shipped, not delivered:\nthe cheaper wrong guess, since the ladder discards a lower rung arriving later.\n\nLADDER      draft -> pending -> confirmed -> processing -> shipped -> delivered\n            Only ever ADVANCES. A lower rung after a higher one is ignored.\nEXCEPTIONS  cancelled, refunded - apply from ANY rung at ANY time.\n\nThis event NEVER changes stock - not even shipped or delivered."
           },
           "response": []
         }

@@ -9,22 +9,37 @@
  *   npm run cli -- order-status SO-10001 shipped
  *   npm run cli -- order-status SO-10001 delivered
  *
- * State mapping (contract 6.1):
- *   accepted | acknowledged | ack               -> accepted
- *   fulfilled | completed | shipped | delivered -> completed
- *   cancelled | canceled                        -> cancelled
- *   rejected | failed | error                   -> manual_review
- *   anything else                               -> NOT MAPPED
+ * State mapping (contract 6.1) - TWO columns:
+ *
+ *   state                                   integration_status  orders.status
+ *   ---------------------------------------------------------------------------
+ *   accepted | acknowledged | ack           accepted            confirmed
+ *   shipped | fulfilled                     completed           shipped
+ *   delivered | completed                   completed           delivered
+ *   cancelled | canceled                    cancelled           cancelled
+ *   returned | return | refunded |
+ *     not_delivered | undelivered           returned            refunded
+ *   rejected | failed | error               manual_review       (unchanged)
+ *   anything else                           NOT MAPPED          (unchanged)
+ *
+ * The second column only moves when the tenant registered
+ * `orderStatusWrite: true` at connect time. This command prints what WOULD
+ * happen for the setting in your .env (ORDER_STATUS_WRITE), including the
+ * ladder rule that discards a lower rung arriving after a higher one.
  *
  * An unmapped state is deliberately allowed here so you can watch what WeAreDA
- * does with it: the event is parked for a human and the order's
- * integration_status is left exactly as it was.
+ * does with it: the operation is rejected with `unknown_order_state` and the
+ * order is left exactly as it was.
  *
  * order.status NEVER changes stock - not even `shipped` or `delivered`.
  */
 import type { CliContext, ParsedArgs } from '../context.js';
 import { buildOrderStatusEvent } from '../../weareda/events.js';
-import { MAPPED_ORDER_STATES, mapsToIntegrationStatus } from '../../weareda/types.js';
+import {
+  MAPPED_ORDER_STATES,
+  mapsToIntegrationStatus,
+  resolveOrderStatusTransition,
+} from '../../weareda/types.js';
 import { log } from '../../lib/logger.js';
 
 export async function orderStatusCommand(ctx: CliContext, args: ParsedArgs): Promise<number> {
@@ -56,8 +71,28 @@ export async function orderStatusCommand(ctx: CliContext, args: ParsedArgs): Pro
   log.plain(
     mapped
       ? `state "${state}" maps to integration_status "${mapped}"`
-      : `state "${state}" is NOT MAPPED - WeAreDA parks the event and leaves integration_status unchanged`,
+      : `state "${state}" is NOT MAPPED - the operation is rejected with ` +
+          'unknown_order_state and the order is left exactly as it was',
   );
+
+  // What the CUSTOMER-FACING status would do. `--current` lets you try the
+  // ladder and the exceptions without a real order behind it.
+  const orderStatusWrite = ctx.config.integration.orderStatusWrite;
+  const currentStatus = typeof args.flags.current === 'string' ? args.flags.current : 'confirmed';
+  const transition = resolveOrderStatusTransition({ currentStatus, state, orderStatusWrite });
+
+  log.plain('');
+  log.plain(`orderStatusWrite = ${orderStatusWrite} (ORDER_STATUS_WRITE in .env)`);
+  log.plain(`Assuming orders.status is currently "${currentStatus}" (override with --current):`);
+  log.plain(`  result.detail   ${transition.detail}`);
+  if (transition.errorCode) {
+    log.plain(`  last_error_code ${transition.errorCode}`);
+  }
+  if (!orderStatusWrite) {
+    log.plain('  Enable it at connect time: integration:connect --order-status-write');
+  }
+
+  log.plain('');
   log.plain('Reminder: this event does not change stock (contract 6.1).');
 
   // Prefer external_order_id (the id WeAreDA stored from our POST /orders

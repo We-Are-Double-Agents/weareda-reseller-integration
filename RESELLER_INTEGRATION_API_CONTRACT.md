@@ -52,11 +52,68 @@ one-time *provisioning* (creating customers/tenants, login links, branding) see
   on your side. **One event per HTTP request** (§6) — `order.status` and
   `stock.updated` are always two separate calls, never one combined payload.
 
+### 1.1 `integrationMode` — the four shapes an integration can take
+
+Four calls go from WeAreDA to your server, and they split along **two independent
+questions**: do we ever *call you to read*, and do you ever *receive an order*?
+
+| Call | Axis |
+|---|---|
+| `GET /` (connection test) | **reads** |
+| `GET /products` (catalog pull) | **reads** |
+| `POST /orders` | **order delivery** |
+| `POST /orders/{id}/cancel` | **order delivery** |
+
+Two axes, four modes. Pick the row that describes your system:
+
+| `integrationMode` | We read from you | You receive orders | Your catalog reaches us by | You must implement |
+|---|---|---|---|---|
+| **`query_and_send`** *(default)* | ✓ `GET /` + `GET /products` | ✓ | scheduled pull (+ pushes accepted) | all four calls |
+| **`receive_and_send`** | ✗ never | ✓ | `product.updated` only | `POST /orders` + cancel |
+| **`query_only`** | ✓ `GET /` + `GET /products` | ✗ never | scheduled pull (+ pushes accepted) | `GET /` + `GET /products` |
+| **`receive_only`** | ✗ never | ✗ never | `product.updated` only | **nothing** — you only publish webhooks |
+
+**Inbound webhooks are not an axis.** You may publish `product.updated`,
+`stock.updated`, `order.status` and `invoice.issued` in *every* mode, as long as a
+webhook secret is configured. What the mode changes is only what **we** do.
+
+Consequences worth stating plainly:
+
+- **`receive_and_send` is not "no outbound calls".** We still deliver orders to you —
+  delivering an order is a *send*, not a query. You still register a `baseUrl` and
+  still implement `POST /orders` and its cancel.
+- **In any mode where we do not read**, no sync schedule is created (and one left by
+  a previous connect is removed), `GET /products` is never called, and
+  `POST …/integration/test-connection` is refused with `422 read_calls_disabled` —
+  the test *is* a read. Your catalog then reaches us **only** through
+  `product.updated`; stop publishing and it simply stops updating, with no error.
+- **In any mode where you do not receive orders**, `ordersWrite` is switched off in
+  the integration's effective capabilities, so orders never enter the delivery queue
+  at all. Nothing is queued and later refused — the connection is simply not a
+  candidate.
+- **`receive_only` still requires a `baseUrl`** at connect time, even though nothing
+  is ever sent to it. It is registered, not called.
+- **`orderStatusWrite` (§6.1) needs a mode that delivers orders.** Combining it with
+  `query_only` or `receive_only` is refused with a `400`: those resellers never
+  receive an order from us, so they have none to report a status on and the flag
+  could never fire. It is otherwise independent of the mode — see below.
+
+The mode also decides the catalog transport, so `sync_config.products.mode` is
+derived from it and must not be set to a contradictory value — doing so is a `400`,
+not a precedence puzzle. An integration configured before this setting existed with
+`products.mode: "push"` reads as **`receive_and_send`** (reads off, orders still
+delivered); nothing to change.
+
+The connect response and `GET …/integration/status` both echo the resolved
+`integrationMode` and `orderDeliveryEnabled`.
+
+---
+
 Two lifecycles run over those endpoints, and they never touch each other:
 
 | Lifecycle | Moved by | Affects | Never affects |
 |---|---|---|---|
-| **Order integration** — `pending → sending → accepted → completed` | `POST /orders` (outbound) and `order.status` (inbound) | the order's `integration_status` and `external_order_id` | **stock** |
+| **Order integration** — `pending → sending → accepted → completed` | `POST /orders` (outbound) and `order.status` (inbound) | the order's `integration_status` and `external_order_id` — plus the customer-facing order status when `orderStatusWrite` is on (§6.1) | **stock** |
 | **Stock** | `stock.updated` (inbound), and the catalog sync (either direction) | reseller-owned `stock_quantity` + a stock-movement audit row | **order status** |
 | **Catalog** | `GET /products` (pull) **or** `product.updated` (push) | reseller-owned product/variant rows | **order status** |
 
@@ -80,9 +137,12 @@ POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
   "externalCredentials": { "apiKey": "sk_live_…" },
   "webhookSecret": "whsec_…",                     // optional but REQUIRED to send us webhooks
   "orderDeliveryStatus": "confirmed",             // which order status triggers delivery
-  "syncConfig": {                                 // optional overrides — see §7
-    "products": { "mode": "push" }                // "pull" (default) | "push"
-  }
+  "orderStatusWrite": false,                      // opt-in: let order.status move the
+                                                  //   customer-facing status too (§6.1)
+  "integrationMode": "query_and_send",            // query_and_send (default) |
+                                                  //   receive_and_send | query_only |
+                                                  //   receive_only — see §1.1
+  "syncConfig": { }                               // optional overrides — see §7
 }
 ```
 
@@ -265,9 +325,10 @@ Off the happy path: `failed` (retries exhausted), `rejected` / `manual_review`
 `cancel_failed`) — see §4.4. The full list is in §8.
 
 > **No step of this lifecycle touches stock.** Delivering, accepting, completing
-> or cancelling an order changes only the order's `integration_status` (and
-> `external_order_id`). If the order changed your inventory, send us a separate
-> `stock.updated` (§6.2, §6.4).
+> or cancelling an order changes the order's `integration_status` (and
+> `external_order_id`), and — only under the `orderStatusWrite` opt-in of §6.1 —
+> the customer-facing order status. It never moves a single unit of inventory. If
+> the order changed yours, send us a separate `stock.updated` (§6.2, §6.4).
 
 **What the payload contains.** The complete order as WeAreDA holds it: order
 number, currency, all monetary totals (`subtotal`, `discount`, `tax`, `shipping`,
@@ -475,17 +536,59 @@ Tell WeAreDA an order changed state on your side. Reference the order by the
 
 **`state` → WeAreDA `integration_status`:**
 
-| Your `state` (aliases) | integration_status |
-|---|---|
-| `accepted` / `acknowledged` / `ack` | `accepted` |
-| `fulfilled` / `completed` / `shipped` / `delivered` | `completed` |
-| `cancelled` / `canceled` | `cancelled` |
-| `rejected` / `failed` / `error` | `manual_review` |
-| anything else | **not mapped** — see below |
+| Your `state` (aliases) | integration_status | order status *(opt-in only)* |
+|---|---|---|
+| `accepted` / `acknowledged` / `ack` | `accepted` | `confirmed` |
+| `shipped` / `fulfilled` | `completed` | `shipped` |
+| `delivered` / `completed` | `completed` | `delivered` |
+| `cancelled` / `canceled` | `cancelled` | `cancelled` |
+| `returned` / `return` / `refunded` / `not_delivered` / `undelivered` | `returned` | `refunded` |
+| `rejected` / `failed` / `error` | `manual_review` | *(unchanged)* |
+| anything else | **not mapped** — see below | *(unchanged)* |
 
-> By default this updates only the **integration** status — it does **not** rewrite
-> the customer-facing order status. (An opt-in to also move the order status may be
-> enabled per connection.)
+**Report a return as a return.** `cancelled` means the order never shipped;
+`returned` means it shipped and came back. They are different business events and
+we keep them apart — a return does **not** trigger a cancellation call back to you.
+
+`rejected` / `failed` / `error` say the *integration* failed, not that the customer's
+order reached a business state, so they never move the customer-facing status.
+
+#### The `orderStatusWrite` opt-in
+
+> **This is a separate setting from `integrationMode` (§1.1), on purpose.** The mode
+> is a fact about your infrastructure — which HTTP calls happen between us — and is
+> stored **per reseller**, shared by every tenant you serve. `orderStatusWrite` is a
+> question of data authority — may your events rewrite a column the tenant's staff
+> see and edit in the CRM — and is stored **per tenant**. A mode change must never
+> silently start rewriting customer-visible order status for all of your tenants at
+> once, so choosing `receive_and_send` does **not** imply this flag. The one
+> combination that is refused is the incoherent one: turning it on under a mode that
+> delivers you no orders (§1.1).
+
+By default this updates only the **integration** status — the customer-facing order
+status is not rewritten. Set `"orderStatusWrite": true` at connect time and your
+`order.status` events also move it, using the third column above.
+
+Two rules govern that write, and both matter for how you sequence your events:
+
+- **Fulfilment progress only ever advances.** The ladder is
+  `draft → pending → confirmed → processing → shipped → delivered`. A rung *below*
+  where the order already sits is treated as a late or reordered event and ignored,
+  so you cannot rewind an order by re-sending an older transition.
+- **`cancelled` and `refunded` apply from anywhere**, at any time — including after
+  `shipped` or `delivered`. An order the customer refused on delivery is an ordinary
+  outcome, not a stale event, and is never filtered out as "backward".
+
+Sending a fulfilment step for an order WeAreDA already holds as `cancelled` or
+`refunded` is treated as a **contradiction**, not an update: the order is left
+untouched, its `integration_status` becomes `manual_review`, and the operation is
+rejected with `order_status_conflict` for a human to resolve. We do not decide which
+of the two systems is right.
+
+When the status does move, it fires the same downstream effects a manual change in
+the CRM would — alert notifications and conversation-lifecycle automation — so the
+tenant's team sees the transition instead of it landing silently. `shipped_at` /
+`delivered_at` are filled in if blank, and never overwritten if already set.
 
 > **`order.status` never changes stock.** `fulfilled` / `shipped` / `delivered`
 > tell us where the order is in *your* fulfilment process; they say nothing about
@@ -739,13 +842,13 @@ transports, or implement only this one and never build the read endpoint.
 Archived products disappear from the AI agent's answers while staying visible and
 auditable in the CRM.
 
-**Push mode.** Setting `sync_config.products.mode = "push"` (§7) additionally tells
-WeAreDA to stop pulling you: no schedule is created, no `GET /products` call is
-ever made, and no archive-missing sweep can run. Leaving it at the default `pull`
-keeps the scheduled sync **and** still accepts pushes — useful as an accelerator, so
-a price change shows up in seconds instead of at the next sync.
+**Push mode.** Choosing an `integrationMode` that does not read — `receive_and_send`
+or `receive_only` (§1.1) — additionally tells WeAreDA to stop pulling you: no schedule is created, no `GET /products` call is
+ever made, and no archive-missing sweep can run. Leaving it at the default
+`query_and_send` keeps the scheduled sync **and** still accepts pushes — useful as an
+accelerator, so a price change shows up in seconds instead of at the next sync.
 
-| | `mode: "pull"` (default) | `mode: "push"` |
+| | modes that read (`query_*`) | modes that do not (`receive_*`) |
 |---|---|---|
 | `GET /products` | required, called on a schedule | never called — you need not implement it |
 | `product.updated` | accepted (accelerator) | accepted (the only catalog source) |
@@ -761,8 +864,11 @@ If your system's paths/params differ from the defaults, send `syncConfig` in the
 
 ```json
 {
+  "integrationMode": "query_and_send",          // see §1.1 — prefer setting this at the
+                                                //   TOP LEVEL of the connect body
   "products": {
-    "mode": "pull",                             // "pull" (default) | "push" — see §6.5
+    "mode": "pull",                             // derived from integrationMode; do not set
+                                                //   it to a contradictory value
     "path": "/products", "pageParam": "page", "pageSizeParam": "limit",
     "sinceParam": "updated_since", "pageSize": 200,
     "itemsKey": null,                          // explicit array key, else auto-detect
@@ -802,7 +908,8 @@ stored result is echoed back in the `connect` and `status` responses.
 ## 8. Statuses reference
 
 **Order `integration_status`** (what WeAreDA tracks per order — this is *not* the
-customer-facing order status, and **none of these values implies a stock effect**):
+customer-facing order status, which moves only under the `orderStatusWrite` opt-in
+of §6.1, and **none of these values implies a stock effect**):
 
 | Value | Meaning | Set by |
 |---|---|---|
@@ -810,6 +917,7 @@ customer-facing order status, and **none of these values implies a stock effect*
 | `sending` | a `POST /orders` attempt is in flight | WeAreDA |
 | `accepted` | you returned `2xx` (id stored as `external_order_id` when present) | your `POST /orders` response |
 | `completed` | you reported fulfilled / completed / shipped / delivered | your `order.status` event |
+| `returned` | you reported returned / refunded / not_delivered — it shipped and came back | your `order.status` event |
 | `failed` | retries exhausted on a transient error | WeAreDA |
 | `rejected` | non-retryable refusal (e.g. the order was already cancelled here) | WeAreDA |
 | `manual_review` | needs a human (auth failure, unknown `state`, unresolvable order) | WeAreDA |
