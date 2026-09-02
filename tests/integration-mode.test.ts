@@ -197,6 +197,37 @@ describe('connect body validation', () => {
     ).toBe(true);
   });
 
+  /* ------------------------------------------------------------------ */
+  /* syncConfig.orders.requiresTaxId (contract 4.3.2, 7)                  */
+  /* ------------------------------------------------------------------ */
+
+  it('accepts syncConfig.orders.requiresTaxId as a boolean', () => {
+    expect(
+      validateConnectBody(connectBody({ syncConfig: { orders: { requiresTaxId: true } } })).ok,
+    ).toBe(true);
+    expect(
+      validateConnectBody(connectBody({ syncConfig: { orders: { requiresTaxId: false } } })).ok,
+    ).toBe(true);
+  });
+
+  it('rejects a non-boolean requiresTaxId as invalid_sync_config', () => {
+    // Like orderStatusWrite, the string "true" is not a boolean (contract 7).
+    const verdict = validateConnectBody(
+      connectBody({ syncConfig: { orders: { requiresTaxId: 'true' } } as never }),
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.errors[0]?.error).toBe('invalid_sync_config');
+    expect(verdict.errors[0]?.message).toContain('requiresTaxId must be a boolean');
+  });
+
+  it('still rejects an unknown syncConfig.orders option', () => {
+    const verdict = validateConnectBody(
+      connectBody({ syncConfig: { orders: { requiresTaxID: true } } as never }),
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.errors[0]?.error).toBe('invalid_sync_config');
+  });
+
   it('rejects the two fields nested in declaredCapabilities as invalid_request', () => {
     const verdict = validateConnectBody(
       connectBody({

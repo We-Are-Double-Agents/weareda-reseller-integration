@@ -6,6 +6,7 @@
  * inbound connector credentials and the outbound webhook HMAC.
  *
  *   npm run cli -- integration:connect [--mode <mode>] [--order-status-write]
+ *                                      [--requires-tax-id]
  *   npm run cli -- integration:status
  *   npm run cli -- integration:test
  *
@@ -37,7 +38,13 @@ const MODE_USAGE = `Modes: ${INTEGRATION_MODES.join(' | ')}`;
  */
 export function buildConnectBody(
   ctx: CliContext,
-  options: { mode: IntegrationMode; orderStatusWrite: boolean; baseUrl?: string },
+  options: {
+    mode: IntegrationMode;
+    orderStatusWrite: boolean;
+    /** Contract 4.3.2 - default false, and false is what most resellers want. */
+    requiresTaxId?: boolean;
+    baseUrl?: string;
+  },
 ): ConnectBody {
   return {
     provider: 'generic_http',
@@ -59,7 +66,14 @@ export function buildConnectBody(
     },
     // No products.mode here: the catalog transport is DERIVED from
     // integrationMode, and contradicting it is a 400.
-    syncConfig: { frequency: 'daily' },
+    //
+    // requiresTaxId, unlike the two fields above, IS a syncConfig option
+    // (contract 7): it configures WeAreDA's delivery eligibility rule, not the
+    // shape of the integration.
+    syncConfig: {
+      frequency: 'daily',
+      orders: { requiresTaxId: options.requiresTaxId ?? false },
+    },
   };
 }
 
@@ -69,7 +83,10 @@ export async function integrationConnectCommand(
 ): Promise<number> {
   const requested = args.flags.mode ?? args.positionals[0] ?? ctx.config.integration.mode;
   if (!isIntegrationMode(requested)) {
-    log.plain(`Usage: npm run cli -- integration:connect [--mode <mode>] [--order-status-write]`);
+    log.plain(
+      'Usage: npm run cli -- integration:connect [--mode <mode>] [--order-status-write] ' +
+        '[--requires-tax-id]',
+    );
     log.plain('');
     log.plain(MODE_USAGE);
     return 1;
@@ -82,9 +99,12 @@ export async function integrationConnectCommand(
         ? false
         : ctx.config.integration.orderStatusWrite;
 
+  const requiresTaxId = args.flags['requires-tax-id'] === true;
+
   const body = buildConnectBody(ctx, {
     mode,
     orderStatusWrite,
+    requiresTaxId,
     baseUrl: typeof args.flags['base-url'] === 'string' ? args.flags['base-url'] : undefined,
   });
 
@@ -101,6 +121,16 @@ export async function integrationConnectCommand(
   );
   log.plain(`  catalog:        ${shape.productsSyncMode}`);
   log.plain(`orderStatusWrite: ${orderStatusWrite}`);
+  log.plain(`syncConfig.orders.requiresTaxId: ${requiresTaxId}`);
+  log.plain(
+    requiresTaxId
+      ? '  An order whose customer has no fiscal id is NOT delivered. It becomes\n' +
+          '  eligible and arrives automatically, within a minute, once the tenant\n' +
+          '  completes the contact - nothing is parked and nothing is re-queued (4.3.2).'
+      : '  The default. Orders arrive whether or not the customer has a fiscal id,\n' +
+          '  and customer.tax_id is null when they do not. If you cannot invoice\n' +
+          '  without one, set this flag - do NOT reject the order on arrival (4.3.2).',
+  );
   log.plain('');
   log.plain('Body (both new fields are TOP LEVEL, siblings of orderDeliveryStatus):');
   log.plain(JSON.stringify({ ...body, externalCredentials: { apiKey: '***' } }, null, 2));

@@ -53,3 +53,94 @@ export function maskUrl(url: string): string {
     return url;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Fiscal identifiers (contract 4.3, 11.8)                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Masks a customer's fiscal identifier (`customer.tax_id.value`).
+ *
+ * A tax id is not a credential, so the redaction list above does not cover it -
+ * it is ordinary payload data that happens to be sensitive personal data. The
+ * contract asks both sides to mask it wherever it reaches an operational log
+ * (11.8), and WeAreDA uses exactly this shape:
+ *
+ *     20-12345678-9  ->  20-******78-9
+ *
+ * The first two and last three ALPHANUMERICS survive, every separator is
+ * preserved, and the length is not disclosed by the separators alone. That is
+ * enough to answer "is this the id I think it is?" while disclosing nothing
+ * usable. A value too short to mask that way is hidden completely rather than
+ * leaked in part.
+ *
+ * IDEMPOTENT: masking an already-masked value returns it unchanged. That
+ * matters because two layers mask independently - the request logger and the
+ * event log - and a second pass over `20-******78-9` would otherwise see five
+ * alphanumerics and blank the lot. No real identifier contains an asterisk.
+ */
+export function maskTaxId(value: string | null | undefined): string {
+  if (!value) return '(none)';
+  if (value.includes('*')) return value;
+
+  const positions: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (isAlphanumeric(value[index] as string)) positions.push(index);
+  }
+
+  if (positions.length <= 5) return value.replace(/[a-z0-9]/gi, '*');
+
+  const keep = new Set([...positions.slice(0, 2), ...positions.slice(-3)]);
+  return [...value]
+    .map((char, index) => (isAlphanumeric(char) && !keep.has(index) ? '*' : char))
+    .join('');
+}
+
+function isAlphanumeric(char: string): boolean {
+  return /[a-z0-9]/i.test(char);
+}
+
+/**
+ * True for every spelling of a tax-id key this repository can meet:
+ * `tax_id` (the pushed payload, 4.3), `taxId` (the read API, 11.3) and the
+ * `customer_tax_id` column the sandbox stores for its invoice flow.
+ */
+function isTaxIdKey(key: string): boolean {
+  return key.toLowerCase().replace(/_/g, '').endsWith('taxid');
+}
+
+/**
+ * Returns a COPY of any JSON-ish value with every fiscal identifier masked.
+ *
+ * Applied at the boundary of everything that renders a payload - the request
+ * log, the local event history, the debug views and the CLI - so that no code
+ * path has to remember. The reseller's own `orders` table deliberately keeps
+ * the real value: you cannot invoice against a masked id.
+ */
+export function maskTaxIds<T>(value: T): T {
+  return maskNode(value) as T;
+}
+
+function maskNode(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map((entry) => maskNode(entry));
+  if (node === null || typeof node !== 'object') return node;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (!isTaxIdKey(key)) {
+      out[key] = maskNode(value);
+      continue;
+    }
+    // `{ type, value, country }` on the wire, a bare string in the column.
+    if (typeof value === 'string') {
+      out[key] = maskTaxId(value);
+    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      const taxId = { ...(value as Record<string, unknown>) };
+      if (typeof taxId.value === 'string') taxId.value = maskTaxId(taxId.value);
+      out[key] = taxId;
+    } else {
+      out[key] = maskNode(value);
+    }
+  }
+  return out;
+}

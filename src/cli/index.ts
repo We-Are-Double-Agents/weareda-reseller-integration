@@ -62,18 +62,24 @@ Webhook events (contract 6). One event type per HTTP request, always.
 
   invoice <orderId>                     invoice.issued   (contract 6.3)
         document_url must be HTTPS and reachable by WeAreDA - run the tunnel
-        and set PUBLIC_BASE_URL first.
+        and set PUBLIC_BASE_URL first. Prints the fiscal identity the invoice
+        is issued against (contract 4.3), masked.
           npm run cli -- invoice SO-10001
 
 Integration configuration (contract 1.1, 2, 6.1) - the X-Reseller-Key plane.
 
-  integration:connect [--mode <mode>] [--order-status-write] [--base-url ...]
+  integration:connect [--mode <mode>] [--order-status-write] [--requires-tax-id]
+                      [--base-url ...]
         Registers the integration. integrationMode and orderStatusWrite are
         TOP-LEVEL fields of the connect body, siblings of orderDeliveryStatus.
+        --requires-tax-id is different: it is syncConfig.orders.requiresTaxId
+        (contract 4.3.2), and it makes WeAreDA hold back an order whose customer
+        has no fiscal id instead of you rejecting it on arrival.
         Modes: query_and_send (default) | receive_and_send | query_only |
                receive_only
           npm run cli -- integration:connect --mode receive_and_send
           npm run cli -- integration:connect --mode query_and_send --order-status-write
+          npm run cli -- integration:connect --requires-tax-id
   integration:status
         Echoes integrationMode, orderDeliveryEnabled and productsSyncMode.
   integration:test

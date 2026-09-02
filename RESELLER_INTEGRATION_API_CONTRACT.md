@@ -333,12 +333,69 @@ Off the happy path: `failed` (retries exhausted), `rejected` / `manual_review`
 **What the payload contains.** The complete order as WeAreDA holds it: order
 number, currency, all monetary totals (`subtotal`, `discount`, `tax`, `shipping`,
 `total`), notes, the shipping address (which carries the recipient's `name` and
-whatever address/contact fields the tenant captured), the idempotency key, and one
-line per item with `sku`, `external_product_id`, `external_variant_id` (the ids you
-gave us in `/products`), display name, variant name, `quantity`, `unit_price`,
-`discount` and line `subtotal`. Nothing beyond what you need to fulfil the order is
-sent — there is no separate customer/contact object, no internal notes, and no
-payment tokens.
+whatever address/contact fields the tenant captured), a **`customer` object**, the
+idempotency key, and one line per item with `sku`, `external_product_id`,
+`external_variant_id` (the ids you gave us in `/products`), display name, variant
+name, `quantity`, `unit_price`, `discount` and line `subtotal`. Nothing beyond what
+you need to fulfil **and invoice** the order is sent — no internal notes, no contact
+custom fields, and no payment tokens.
+
+**`customer` (added 2026-09; optional, additive).** The customer the order was
+created for, including their **fiscal identification** when the tenant captured one:
+
+```json
+"customer": {
+  "id": "contact-uuid",
+  "name": "Juan Pérez",
+  "first_name": "Juan",
+  "last_name": "Pérez",
+  "email": "juan@example.com",
+  "phone": "+541112345678",
+  "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+}
+```
+
+- `tax_id` is **`null`** when the contact has no fiscal identification — the key is
+  always present inside `customer`, so you can branch on it without guessing.
+- `tax_id.type` is a **free short token**, not an enum: `CUIT`, `CUIL`, `DNI`, `CPF`,
+  `CNPJ`, `NIF`, `NIE`, `CIF`, `RFC`, `EIN`, `SSN`, `VAT`, `TAX_ID` — or any other
+  identifier a country uses. Do not reject an unknown one.
+- `tax_id.country` is an **ISO 3166-1 alpha-2** code.
+- The whole `customer` key is **omitted** when the order has no contact at all.
+- **The values are a snapshot** taken when the order was created — see §4.3.1.
+- Fiscal identification is **optional** unless you opt into
+  `syncConfig.orders.requiresTaxId` (§7.2).
+
+#### 4.3.1 The customer is a snapshot, not a live read
+
+The customer we send you (and return in §11) is **copied onto the order when the
+order is created**, not read from the contact at delivery time. If the tenant later
+corrects the contact's tax id, an order you already received — and possibly already
+invoiced — keeps the identity it was created with. New orders carry the new value.
+
+This is deliberate: an invoice is issued against a fiscal identity, and that
+identity must not change retroactively. Orders created before this shipped have no
+snapshot; for those we fall back to the contact as it is today, exactly as before.
+
+One exception, in your favour: if the order was created **before the customer had
+any** fiscal identification, and the tenant captures one later, that order starts
+reporting it. The snapshot freezes a *value*, not an *absence* — so an order parked
+under `requiresTaxId` (§4.3.2) becomes deliverable once the tenant completes the
+contact. A fiscal id we already recorded on an order **never** changes.
+
+#### 4.3.2 Requiring a fiscal id (`requiresTaxId`)
+
+If you cannot accept an order without the customer's fiscal identifier, set
+`syncConfig.orders.requiresTaxId: true` (§7.2). An order whose customer has no
+`tax_id.type` + `tax_id.value` is then **never sent** to you — it simply is not yet
+eligible for delivery, and it **is delivered automatically, within a minute, as soon
+as the tenant completes the contact**. Nothing is lost and nobody has to re-queue
+anything: the order waits rather than arriving for you to reject.
+
+Default is `false`, which is the behaviour every existing integration keeps.
+
+> This never blocks order creation inside the CRM. A tenant can always take an order
+> from a customer who has not given a tax id; only the delivery to *you* waits.
 
 **Request:**
 ```
@@ -354,6 +411,14 @@ Idempotency-Key: order:6b1e…                 # also present in the body
   "subtotal": 10000, "discount": 0, "tax": 0, "shipping": 500, "total": 10500,
   "notes": "leave at door",
   "shipping_address": { "name": "Ada", "line1": "…", "city": "…", "country": "AR" },
+  "customer": {
+    "id": "contact-uuid",
+    "name": "Ada Lovelace",
+    "first_name": "Ada", "last_name": "Lovelace",
+    "email": "ada@example.com",
+    "phone": "+541112345678",
+    "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+  },
   "idempotency_key": "order:6b1e…",
   "items": [
     {
@@ -903,7 +968,9 @@ If your system's paths/params differ from the defaults, send `syncConfig` in the
   },
   "orders": {
     "path": "/orders", "idempotencyHeader": "Idempotency-Key",
-    "orderIdField": "id"                        // where your order id is in the response
+    "orderIdField": "id",                       // where your order id is in the response
+    "requiresTaxId": false                      // §4.3.2 — true = never send an order whose
+                                                //   customer has no fiscal identifier
   },
   "documentHosts": ["files.your-erp.com"],     // extra allow-listed hosts for invoice PDFs
   "enabled": true,                              // false disables the scheduled sync
@@ -923,6 +990,7 @@ it is not free-form. An invalid config fails the connect with
 | `pageParam`, `pageSizeParam`, `sinceParam`, `itemsKey`, `orderIdField`, `fieldMap` keys/values | short alphanumeric field names (≤ 64 chars) |
 | `products.pageSize` | integer 1–500 |
 | `orders.idempotencyHeader` | a valid HTTP header name |
+| `orders.requiresTaxId` | a boolean (default `false` — see §4.3.2) |
 | `documentHosts` | up to 10 **bare hostnames** (`files.your-erp.com`) — never a URL, port, or path |
 | `frequency` / `scheduleExpression` | `hourly\|daily\|weekly`, or a `rate(…)` / `cron(…)` expression |
 
@@ -970,7 +1038,15 @@ authoritative value you sent (`stock.updated`, or the `/products` pull).
   each hop; private/internal addresses are refused (SSRF hardening).
 - **Inbound** is authenticated solely by the HMAC signature — the URL is not a
   secret, the signature is. Rotate the `webhookSecret` by re-connecting.
-- WeAreDA never logs your credentials or raw request/response bodies.
+- WeAreDA never logs your credentials or raw request/response bodies. **Customer
+  fiscal identifiers are masked** (`20-******78-9`) wherever they appear in an
+  operational log, and are never written to an audit record in full.
+- **Compatibility.** This contract is **not versioned by URL**; it evolves additively
+  and every consumer must ignore fields it does not know. The `customer` object and
+  its `tax_id` (§4.3) were added that way — no existing field was renamed, removed,
+  or given a new meaning, so an integration written before them keeps working
+  unchanged and no version bump was warranted. A breaking change would get a new
+  path, not a silent redefinition.
 - Timeouts: outbound calls use a bounded timeout (≤ 60 s; ~10–15 s typical) — your
   endpoints should respond well within that or return `202`-style fast acks and do
   heavy work async on your side.
@@ -999,6 +1075,10 @@ authoritative value you sent (`stock.updated`, or the `/products` pull).
 - [ ] You send a `stock.updated` after any inventory change — whether an order caused
       it or not. You do **not** assume WeAreDA adjusted stock from the order itself.
 - [ ] You verify our outbound credentials and we verify your inbound signature.
+- [ ] You accept an **unknown `customer.tax_id.type`** (it is a free token, not an
+      enum) and you tolerate `customer` / `customer.tax_id` being absent or `null`.
+- [ ] If you cannot invoice without a fiscal id, you set
+      `syncConfig.orders.requiresTaxId: true` (§4.3.2) rather than rejecting orders.
 
 ---
 
@@ -1089,7 +1169,10 @@ List response:
       "tax": 2100,
       "shipping": 0,
       "total": 12100,
-      "customer": { "id": "customer-uuid", "name": "Juan Pérez", "email": "juan@example.com", "phone": "+549..." },
+      "customer": {
+        "id": "customer-uuid", "name": "Juan Pérez", "email": "juan@example.com", "phone": "+549...",
+        "taxId": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+      },
       "itemsCount": 2,
       "invoiceCount": 1,
       "createdAt": "2026-07-28T12:00:00Z",
@@ -1115,7 +1198,11 @@ Order **items are not included in the list** — request the detail endpoint.
   "integrationStatus": "completed",
   "currency": "ARS",
   "subtotal": 10000, "discount": 0, "tax": 2100, "shipping": 0, "total": 12100,
-  "customer": { "id": "customer-uuid", "firstName": "Juan", "lastName": "Pérez", "name": "Juan Pérez", "email": "juan@example.com", "phone": "+549..." },
+  "customer": {
+    "id": "customer-uuid", "firstName": "Juan", "lastName": "Pérez", "name": "Juan Pérez",
+    "email": "juan@example.com", "phone": "+549...",
+    "taxId": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+  },
   "billingAddress": { "line1": "…", "city": "…", "state": "…", "postalCode": "…", "country": "…" },
   "shippingAddress": { },
   "items": [
@@ -1183,10 +1270,14 @@ error model:
 
 ### 11.8 Privacy & auditing
 
-- **List** exposes a minimal customer (display name, email, phone). **Detail** may add
-  billing/shipping address and fulfilment contact details. Never exposed: internal
-  notes, contact custom fields, Cognito/auth identifiers, conversation history,
-  payment tokens/provider payloads, S3 keys, or infrastructure identifiers.
+- **List** exposes a minimal customer (display name, email, phone, `taxId`). **Detail**
+  may add billing/shipping address and fulfilment contact details. Never exposed:
+  internal notes, contact custom fields, Cognito/auth identifiers, conversation
+  history, payment tokens/provider payloads, S3 keys, or infrastructure identifiers.
+- **Fiscal identifiers are sensitive customer data.** They are visible only to the
+  reseller that owns the tenant (the same isolation as every other order field), and
+  they are **never written to an operational log in full** — our logs carry a masked
+  form (`20-******78-9`) or nothing at all. Treat them the same way on your side.
 - Successful reads are **not** written to the reseller audit log (consistent with the
   platform's other reseller read endpoints and to avoid high-volume audit noise);
   authorization failures and the invoice-document download **are** audited

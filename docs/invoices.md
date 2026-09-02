@@ -31,6 +31,85 @@ Link the invoice to its order with `external_order_id` (the id you returned from
 
 ---
 
+## Who you are invoicing — the order's fiscal identity
+
+Contract §4.3. The delivered order carries a `customer`, and with it the
+contact's fiscal identification when the tenant captured one:
+
+```json
+"customer": {
+  "name": "Ada Lovelace",
+  "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+}
+```
+
+`npm run cli -- invoice SO-10001` prints it before sending, masked:
+
+```
+Invoicing against (contract 4.3, a snapshot taken when the order was created):
+  Order:    SO-10001 (ORD-1042)
+  Customer: Ada Lovelace
+  Tax id:   CUIT 20-******78-9 (AR)
+            Stored in full locally; masked here and in every log.
+```
+
+Three things matter here, and all three are easy to get wrong.
+
+**It is a snapshot, not a live read** (§4.3.1). The values were copied onto the
+order when it was created. If the tenant corrects the contact tomorrow, this
+invoice keeps the identity it was issued under, and only *new* orders carry the
+new value — an invoice is issued against a fiscal identity, and that identity
+must not change retroactively. Never refresh a stored order from a later read of
+the customer.
+
+**`tax_id.type` is a free token, not an enum.** `CUIT`, `CPF`, `NIF`, `RFC`,
+`KENNITALA`, whatever the next country uses. Your invoice should print what it
+was given, not what it recognises.
+
+**The event itself carries no customer.** `invoice.issued` links to the order by
+`external_order_id` / `order_number`; WeAreDA already holds the snapshot. There
+is nothing about the customer to send back.
+
+### When the order has no fiscal id
+
+An order with `customer.tax_id: null` — or with no `customer` at all — is an
+ordinary order and must be accepted. The CLI says so plainly:
+
+```
+  Tax id:   (none)
+
+  NOTE: this order carries no fiscal identification, which is NORMAL and
+        not an error - customer.tax_id is null when the contact has none.
+        ...
+        If you cannot invoice without one, set
+          syncConfig.orders.requiresTaxId: true   (contract 4.3.2)
+```
+
+If your billing genuinely cannot issue an invoice without a fiscal id, that flag
+is the answer (§4.3.2):
+
+```bash
+npm run cli -- integration:connect --requires-tax-id
+```
+
+WeAreDA then never delivers such an order — it is simply not yet eligible — and
+delivers it automatically, within a minute, once the tenant completes the
+contact. Nothing is parked and nothing has to be re-queued.
+
+**Rejecting the delivery is the wrong answer.** A non-auth `4xx` is not retried,
+so it turns an order that would have arrived complete into a manual-review
+ticket. See [orders.md](orders.md#the-customer-and-its-fiscal-id).
+
+### Masking
+
+Fiscal identifiers are sensitive customer data (§11.8). WeAreDA masks them in
+its operational logs and asks you to do the same. This sandbox keeps the real
+value on the order — you cannot invoice against a masked one — and masks it
+everywhere it is rendered: the request log, the event history, `GET
+/debug/orders` and every CLI command.
+
+---
+
 ## Idempotency
 
 Re-sending the same `external_invoice_id` **updates the invoice in place** — an
@@ -100,7 +179,7 @@ WARNING: that URL is not HTTPS, so WeAreDA cannot fetch it.
 
 Fixtures live in `fixtures/invoices/`: `demo.pdf` and `demo-invoice.json`, which
 holds the invoice metadata the CLI uses as its defaults. Both are sample data —
-no real company, customer or payment details.
+no real company, customer, fiscal identifier or payment details.
 
 ---
 

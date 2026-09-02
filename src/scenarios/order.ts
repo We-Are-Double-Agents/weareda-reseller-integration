@@ -14,11 +14,17 @@
  *
  * Steps 5 and 6-8 are different HTTP requests with different event ids, and
  * neither implies the other.
+ *
+ * The order also carries a `customer` with a fiscal identification (contract
+ * 4.3). Watch where it appears: in full in the stored order (you invoice
+ * against it), and MASKED everywhere it is rendered - the request log, the
+ * event history and this scenario's own output (contract 11.8).
  */
 import { createScenarioContext, scenarioBanner, step, webhookModeNotice } from './harness.js';
 import { buildOrderStatusEvent, buildStockUpdatedEvent } from '../weareda/events.js';
 import { log } from '../lib/logger.js';
-import type { OrderPayload } from '../weareda/types.js';
+import { maskTaxId, maskTaxIds } from '../lib/redact.js';
+import { taxIdOf, type OrderPayload } from '../weareda/types.js';
 
 const DEMO_ORDER: OrderPayload = {
   order_number: `ORD-${Math.floor(Date.now() / 1000) % 100000}`,
@@ -34,6 +40,19 @@ const DEMO_ORDER: OrderPayload = {
     line1: '1 Example Street',
     city: 'Example City',
     country: 'AR',
+  },
+  // Contract 4.3. Omitted entirely when the order has no contact; `tax_id` is
+  // null when the contact has no fiscal identification (see the cancellation
+  // scenario for that path). The number below is deliberately fake.
+  customer: {
+    id: 'contact-0000-example',
+    name: 'Example Customer',
+    first_name: 'Example',
+    last_name: 'Customer',
+    email: 'customer@example.test',
+    phone: '+541100000000',
+    // `type` is a free token, NOT an enum. Accept whatever arrives.
+    tax_id: { type: 'CUIT', value: '20-12345678-9', country: 'AR' },
   },
   idempotency_key: `order:scenario-${Date.now()}`,
   items: [
@@ -67,6 +86,11 @@ async function main(): Promise<void> {
   step(1, 'WeAreDA -> Reseller: POST /orders');
   const before = ctx.products.stockSnapshot();
   log.plain(`Stock before: P-1002=${before['P-1002']} V-2001=${before['V-2001']}`);
+  const delivered = taxIdOf(DEMO_ORDER);
+  log.plain(
+    `The order carries a customer with a fiscal id: ${delivered?.type} ` +
+      `${maskTaxId(delivered?.value)} (${delivered?.country}) - masked here and in the log.`,
+  );
 
   const delivery = await ctx.callAsWeAreDA('POST', '/orders', {
     body: DEMO_ORDER,
@@ -80,7 +104,17 @@ async function main(): Promise<void> {
   /* -------------------------------------------------------------------- */
   step(2, 'The order now exists on the reseller side');
   const stored = ctx.orders.findById(orderId);
-  log.plain(JSON.stringify(stored, null, 2));
+  // Printed masked. The row itself keeps the real value - that is what the
+  // invoice flow reads (contract 4.3, 11.8).
+  log.plain(JSON.stringify(maskTaxIds(stored), null, 2));
+  log.plain('');
+  log.plain(
+    'customer_name / customer_tax_id are surfaced as columns for the invoice flow. ' +
+      'Nothing about the customer changes how the order is handled: it does not ' +
+      'gate acceptance, it does not touch stock, and an unknown tax_id.type is ' +
+      'stored verbatim (contract 4.3).',
+  );
+  log.plain('Try the payoff:  npm run cli -- invoice ' + orderId);
 
   /* -------------------------------------------------------------------- */
   step(3, 'Stock was NOT touched by the delivery');
@@ -133,6 +167,10 @@ async function main(): Promise<void> {
     `Order ${orderId} was delivered, accepted, shipped and delivered.`,
     'Stock moved exactly once - in step 4-5, because the ERP said so,',
     'never because an order event implied it.',
+    '',
+    'The customer travelled with the order and its fiscal id was masked in every',
+    'log line (contract 11.8). An order WITHOUT one is equally valid - see',
+    '`npm run scenario:cancellation`, whose order has customer.tax_id: null.',
     '',
     'Inspect what happened:',
     `  curl ${ctx.baseUrl}/debug/orders`,

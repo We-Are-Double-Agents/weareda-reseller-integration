@@ -66,9 +66,61 @@ export interface ShippingAddress {
 }
 
 /**
- * Note there is no `external_order_id` here, and no customer object: the
- * delivered payload identifies the order by `order_number` + `idempotency_key`,
- * and the recipient by the shipping address (contract 4.3).
+ * A customer's fiscal identification (contract 4.3).
+ *
+ * `type` is a FREE SHORT TOKEN, NOT AN ENUM. CUIT, CUIL, DNI, CPF, CNPJ, NIF,
+ * NIE, CIF, RFC, EIN, SSN, VAT, TAX_ID - and whatever else the next country
+ * uses. Meeting a value you have never seen is NORMAL: store it verbatim,
+ * never normalise it into a token you do recognise, and never reject the order
+ * over it. This is deliberately not a union type, so that nobody can turn it
+ * into one without deleting this comment first.
+ */
+export interface TaxId {
+  /** e.g. "CUIT". Free token - see above. */
+  type: string;
+  /** e.g. "20-12345678-9". Sensitive: mask it before it reaches a log (11.8). */
+  value: string;
+  /** ISO 3166-1 alpha-2, e.g. "AR". */
+  country?: string;
+}
+
+/**
+ * The customer an order was created for (contract 4.3, added 2026-09).
+ *
+ * OPTIONAL AND ADDITIVE. The whole key is omitted when the order has no
+ * contact, so an integration written before this keeps working untouched.
+ *
+ * `tax_id` is different: the key is ALWAYS PRESENT inside `customer` and is
+ * `null` when the contact has no fiscal identification, so branching on it
+ * needs no optional chaining. A defensive reader still tolerates it missing.
+ *
+ * SNAPSHOT, NOT A LIVE READ (contract 4.3.1). These values were copied onto
+ * the order when it was created. They will not necessarily match a later read
+ * of the same customer, and a stored order must never be "corrected" from one:
+ * an invoice is issued against the identity the order was created with. The
+ * one exception is in your favour - an order that arrived with NO fiscal id
+ * may later report one, because WeAreDA fills that gap from the contact. The
+ * snapshot freezes a value, not an absence.
+ */
+export interface CustomerPayload {
+  id?: string;
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone?: string;
+  /** `null` when the contact has no fiscal identification. Never omitted. */
+  tax_id: TaxId | null;
+}
+
+/**
+ * Note there is no `external_order_id` here: the delivered payload identifies
+ * the order by `order_number` + `idempotency_key`, and the recipient by the
+ * shipping address (contract 4.3).
+ *
+ * It DOES carry a `customer` object, with the contact's fiscal identification
+ * when the tenant captured one - optional in both senses: `customer` may be
+ * absent, and `customer.tax_id` may be `null`.
  */
 export interface OrderPayload {
   order_number?: string;
@@ -80,8 +132,34 @@ export interface OrderPayload {
   total?: number;
   notes?: string;
   shipping_address?: ShippingAddress;
+  /** Omitted entirely when the order has no contact (contract 4.3). */
+  customer?: CustomerPayload;
   idempotency_key?: string;
   items: OrderItemPayload[];
+}
+
+/**
+ * The customer of a delivered order, or `null` when it has none.
+ *
+ * Tolerates every shape a lenient validator lets through, so no caller has to
+ * guard (contract 4.3: `customer` absent is an ordinary order).
+ */
+export function customerOf(payload: OrderPayload | null | undefined): CustomerPayload | null {
+  const customer = payload?.customer;
+  if (!customer || typeof customer !== 'object' || Array.isArray(customer)) return null;
+  return customer;
+}
+
+/**
+ * The fiscal identification of a delivered order, or `null` when there is
+ * none. `null` is an ordinary answer, not an error - see `requiresTaxId`
+ * (contract 4.3.2) if your billing cannot live with it.
+ */
+export function taxIdOf(payload: OrderPayload | null | undefined): TaxId | null {
+  const taxId = customerOf(payload)?.tax_id;
+  if (!taxId || typeof taxId !== 'object' || Array.isArray(taxId)) return null;
+  if (typeof taxId.type !== 'string' || typeof taxId.value !== 'string') return null;
+  return taxId;
 }
 
 /** Contract 4.4 - both the per-order and the fallback cancel path. */

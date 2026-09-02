@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS orders (
   status              TEXT NOT NULL,             -- received | cancelled
   currency            TEXT,
   total               INTEGER,
+  -- Surfaced from payload.customer (contract 4.3, added 2026-09) for the
+  -- invoice flow and the debug views. NULL when the order has no contact;
+  -- customer_tax_id alone is NULL when the contact has no fiscal id. Both are
+  -- optional data - nothing here is ever required to accept an order.
+  customer_name       TEXT,
+  customer_tax_id     TEXT,                      -- stored in full: you invoice against it
   payload             TEXT NOT NULL,             -- raw order payload as delivered
   received_at         TEXT NOT NULL,
   cancelled_at        TEXT,
@@ -97,6 +103,30 @@ CREATE TABLE IF NOT EXISTS counters (
 );
 `;
 
+/**
+ * Columns added after the first release. The schema above uses
+ * `CREATE TABLE IF NOT EXISTS`, so an existing sandbox - which may well carry
+ * orders you want to keep - never sees the new definition. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, so each one is checked against `PRAGMA
+ * table_info` and added only when missing. Adding a nullable column is the
+ * additive migration that matches an additive payload change (contract 9).
+ */
+const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [
+  // contract 4.3 - the customer object.
+  { table: 'orders', column: 'customer_name', definition: 'TEXT' },
+  { table: 'orders', column: 'customer_tax_id', definition: 'TEXT' },
+];
+
+function applyAddedColumns(db: Database): void {
+  for (const { table, column, definition } of ADDED_COLUMNS) {
+    const existing = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{
+      name: string;
+    }>;
+    if (existing.some((row) => row.name === column)) continue;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 export function openDatabase(path: string): Database {
   const isMemory = path === ':memory:';
   const location = isMemory ? ':memory:' : resolve(process.cwd(), path);
@@ -106,6 +136,7 @@ export function openDatabase(path: string): Database {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  applyAddedColumns(db);
   return db;
 }
 

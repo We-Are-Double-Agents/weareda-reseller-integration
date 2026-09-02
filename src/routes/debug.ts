@@ -7,6 +7,7 @@
  * do not expose them from anything resembling production.
  */
 import type { FastifyInstance } from 'fastify';
+import { maskTaxIds } from '../lib/redact.js';
 import type { EventLog } from '../services/event-log.js';
 import type { OrderService } from '../services/order-service.js';
 import type { ProductService } from '../services/product-service.js';
@@ -15,9 +16,13 @@ export function registerDebugRoutes(
   app: FastifyInstance,
   deps: { orders: OrderService; products: ProductService; eventLog: EventLog },
 ): void {
+  // Customers' fiscal identifiers are masked here, exactly as they are in the
+  // request log and the event history (contract 11.8). The stored order keeps
+  // the real value - a debug view is a place to look, not a place to invoice
+  // from.
   app.get('/debug/orders', async () => ({
     count: deps.orders.count(),
-    orders: deps.orders.list(200),
+    orders: maskTaxIds(deps.orders.list(200)),
   }));
 
   app.get('/debug/products', async () => ({

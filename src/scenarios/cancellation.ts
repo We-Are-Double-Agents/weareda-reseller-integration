@@ -14,6 +14,7 @@
 import { createScenarioContext, scenarioBanner, step, webhookModeNotice } from './harness.js';
 import { buildStockUpdatedEvent } from '../weareda/events.js';
 import { log } from '../lib/logger.js';
+import { maskTaxIds } from '../lib/redact.js';
 import type { OrderPayload } from '../weareda/types.js';
 
 async function main(): Promise<void> {
@@ -29,6 +30,17 @@ async function main(): Promise<void> {
     shipping: 0,
     total: 4999,
     shipping_address: { name: 'Example Recipient', line1: '1 Example Street', country: 'AR' },
+    // The OTHER half of contract 4.3: a customer whose contact has no fiscal
+    // identification. `tax_id` is null - the key is always present inside
+    // `customer`, so no optional chaining is needed to branch on it - and the
+    // order is accepted exactly like any other. See the invoice command for
+    // what to do when you cannot bill without one (requiresTaxId, 4.3.2).
+    customer: {
+      id: 'contact-0001-example',
+      name: 'Example Customer Without A Fiscal Id',
+      email: 'no-tax-id@example.test',
+      tax_id: null,
+    },
     idempotency_key: `order:${suffix}`,
     items: [
       {
@@ -77,7 +89,9 @@ async function main(): Promise<void> {
 
   /* -------------------------------------------------------------------- */
   step(3, 'The order is cancelled on the reseller side');
-  log.plain(JSON.stringify(ctx.orders.findById(orderId), null, 2));
+  // Masked on the way out, like every other rendering of an order (11.8).
+  // This one's customer has tax_id: null, which is an ordinary order.
+  log.plain(JSON.stringify(maskTaxIds(ctx.orders.findById(orderId)), null, 2));
 
   /* -------------------------------------------------------------------- */
   step(4, 'Stock was NOT restored by the cancellation');

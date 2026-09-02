@@ -3,7 +3,14 @@
  * Direction: WeAreDA -> Reseller.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { authHeaders, createTestSandbox, orderPayload, type TestSandbox } from './helpers.js';
+import {
+  authHeaders,
+  createTestSandbox,
+  customerPayload,
+  orderPayload,
+  orderPayloadWithoutCustomer,
+  type TestSandbox,
+} from './helpers.js';
 
 describe('POST /orders (WeAreDA -> Reseller)', () => {
   let sandbox: TestSandbox;
@@ -92,6 +99,168 @@ describe('POST /orders (WeAreDA -> Reseller)', () => {
       const notes = inbound.map((entry) => entry.note ?? '').join('\n');
       expect(notes).toContain('Duplicate delivery detected');
       expect(notes).toContain('No duplicate order created');
+    });
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* The customer object and its fiscal identification (contract 4.3)        */
+  /* ---------------------------------------------------------------------- */
+
+  describe('customer and fiscal identification (contract 4.3)', () => {
+    it('accepts an order with a full customer.tax_id and persists the customer', async () => {
+      const payload = orderPayload();
+      const { statusCode, body } = await postOrder(payload, 'order:6b1e');
+      expect(statusCode).toBe(201);
+
+      const stored = sandbox.orders.findById(body.id);
+      // Stored verbatim, snapshot and all (contract 4.3.1).
+      expect(stored?.payload.customer).toEqual(payload.customer);
+      expect(stored?.payload.customer?.tax_id).toEqual({
+        type: 'CUIT',
+        value: '20-12345678-9',
+        country: 'AR',
+      });
+      // ...and surfaced as columns for the invoice flow.
+      expect(stored?.customer_name).toBe('Ada Lovelace');
+      expect(stored?.customer_tax_id).toBe('20-12345678-9');
+    });
+
+    it('accepts an order with NO customer key, exactly as before the field existed', async () => {
+      const payload = orderPayloadWithoutCustomer();
+      expect(payload.customer).toBeUndefined();
+
+      const { statusCode, body } = await postOrder(payload, 'order:no-customer');
+      // The additive change must not have made anything required (contract 9).
+      expect(statusCode).toBe(201);
+      expect(body.status).toBe('received');
+
+      const stored = sandbox.orders.findById(body.id);
+      expect(stored?.payload.customer).toBeUndefined();
+      expect(stored?.customer_name).toBeNull();
+      expect(stored?.customer_tax_id).toBeNull();
+    });
+
+    it('accepts customer.tax_id: null - a contact with no fiscal identification', async () => {
+      const { statusCode, body } = await postOrder(
+        orderPayload({ customer: customerPayload({ tax_id: null }) }),
+        'order:no-tax-id',
+      );
+      expect(statusCode).toBe(201);
+
+      const stored = sandbox.orders.findById(body.id);
+      // The key is present and null - branching on it needs no optional chaining.
+      expect(stored?.payload.customer?.tax_id).toBeNull();
+      expect(stored?.customer_tax_id).toBeNull();
+      expect(stored?.customer_name).toBe('Ada Lovelace');
+    });
+
+    it('accepts a customer object with no tax_id key at all', async () => {
+      const customer = customerPayload();
+      delete customer.tax_id;
+      const { statusCode, body } = await postOrder(
+        orderPayload({ customer }),
+        'order:missing-tax-id',
+      );
+      expect(statusCode).toBe(201);
+      expect(sandbox.orders.findById(body.id)?.customer_tax_id).toBeNull();
+    });
+
+    /**
+     * THE REGRESSION TEST FOR THE WHOLE FEATURE.
+     *
+     * `tax_id.type` is a free short token, not an enum. If someone ever adds a
+     * list of "known" types and validates against it, this fails. KENNITALA is
+     * Iceland's; the next one will be from a country nobody thought about.
+     */
+    it('accepts an UNKNOWN tax_id.type verbatim and never normalises it', async () => {
+      const kennitala = { type: 'KENNITALA', value: '120174-3389', country: 'IS' };
+      const { statusCode, body } = await postOrder(
+        orderPayload({ customer: customerPayload({ tax_id: kennitala }) }),
+        'order:kennitala',
+      );
+
+      expect(statusCode).toBe(201);
+      const stored = sandbox.orders.findById(body.id);
+      expect(stored?.payload.customer?.tax_id).toEqual(kennitala);
+      // Not mapped, not renamed, not coerced into a type we do recognise.
+      expect(stored?.payload.customer?.tax_id?.type).toBe('KENNITALA');
+      expect(stored?.customer_tax_id).toBe('120174-3389');
+    });
+
+    it('accepts a tax_id value in a format nothing here recognises', async () => {
+      const { statusCode } = await postOrder(
+        orderPayload({
+          customer: customerPayload({ tax_id: { type: 'TAX_ID', value: 'no-checksum-at-all' } }),
+        }),
+        'order:weird-format',
+      );
+      expect(statusCode).toBe(201);
+    });
+
+    it('accepts an order whose customer has no name', async () => {
+      const customer = customerPayload();
+      delete customer.name;
+      const { statusCode, body } = await postOrder(orderPayload({ customer }), 'order:no-name');
+      expect(statusCode).toBe(201);
+      expect(sandbox.orders.findById(body.id)?.customer_name).toBeNull();
+    });
+
+    it('stays idempotent when the same order is re-delivered with the same customer', async () => {
+      const first = await postOrder(orderPayload(), 'order:6b1e');
+      const second = await postOrder(orderPayload(), 'order:6b1e');
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(200);
+      expect(second.body.id).toBe(first.body.id);
+      expect(sandbox.orders.count()).toBe(1);
+      expect(sandbox.orders.findById(first.body.id)?.customer_tax_id).toBe('20-12345678-9');
+    });
+
+    describe('a malformed customer is handled, never with a 500', () => {
+      for (const [label, customer] of [
+        ['a string', 'Ada Lovelace'],
+        ['an array', [{ name: 'Ada' }]],
+        ['a number', 42],
+      ] as const) {
+        it(`rejects ${label} with 400, not 500`, async () => {
+          const { statusCode, body } = await postOrder(
+            orderPayload({ customer }),
+            `order:bad-${label.replace(/\s/g, '-')}`,
+          );
+          expect(statusCode).toBe(400);
+          expect(body.error).toBe('invalid_order');
+          expect(body.details.join(' ')).toContain('customer must be an object');
+        });
+      }
+
+      it('does not reject a malformed tax_id - it is treated as no fiscal id', async () => {
+        // A shape we cannot read is not a reason to send the order to
+        // manual_review. Accept it, store it verbatim, invoice without it.
+        const { statusCode, body } = await postOrder(
+          orderPayload({ customer: customerPayload({ tax_id: 'CUIT 20-12345678-9' }) }),
+          'order:bad-tax-id',
+        );
+        expect(statusCode).toBe(201);
+        expect(sandbox.orders.findById(body.id)?.customer_tax_id).toBeNull();
+      });
+
+      it('accepts customer: null as no customer at all', async () => {
+        const { statusCode } = await postOrder(
+          orderPayload({ customer: null }),
+          'order:null-customer',
+        );
+        expect(statusCode).toBe(201);
+      });
+    });
+
+    it('derives no stock, status or other behaviour from the customer', async () => {
+      // Contract 6.4 is unchanged by any of this: the customer object is data.
+      const before = sandbox.products.stockSnapshot();
+      const { body } = await postOrder(orderPayload(), 'order:6b1e');
+      const after = sandbox.products.stockSnapshot();
+
+      expect(after).toEqual(before);
+      expect(sandbox.orders.findById(body.id)?.status).toBe('received');
     });
   });
 
