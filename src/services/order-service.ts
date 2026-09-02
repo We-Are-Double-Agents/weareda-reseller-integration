@@ -14,6 +14,7 @@
 import type { Database } from '../storage/db.js';
 import { nextCounter } from '../storage/db.js';
 import type { CancelPayload, OrderPayload } from '../weareda/types.js';
+import { customerOf, taxIdOf } from '../weareda/types.js';
 import { isoNow } from '../lib/ids.js';
 
 export const FIRST_ORDER_NUMBER = 10_001;
@@ -27,6 +28,18 @@ export interface StoredOrder {
   status: OrderStatus;
   currency: string | null;
   total: number | null;
+  /**
+   * Denormalised from `payload.customer` for the invoice flow and the debug
+   * views (contract 4.3). Both are `null` for an order with no contact, and
+   * `customer_tax_id` alone is `null` when the contact has no fiscal id.
+   *
+   * The FULL identifier is stored here on purpose: this is the reseller's own
+   * order book, and you cannot invoice against a masked value. Masking happens
+   * where the order is RENDERED - the request log, the event history, the debug
+   * views and the CLI (contract 11.8, src/lib/redact.ts).
+   */
+  customer_name: string | null;
+  customer_tax_id: string | null;
   payload: OrderPayload;
   received_at: string;
   cancelled_at: string | null;
@@ -66,6 +79,8 @@ interface OrderRow {
   status: OrderStatus;
   currency: string | null;
   total: number | null;
+  customer_name: string | null;
+  customer_tax_id: string | null;
   payload: string;
   received_at: string;
   cancelled_at: string | null;
@@ -138,6 +153,8 @@ export class OrderService {
       details.push('currency must be a string when present');
     }
 
+    validateCustomer(order.customer, details);
+
     if (details.length > 0) {
       throw new ValidationError('Order payload failed validation', details);
     }
@@ -182,11 +199,17 @@ export class OrderService {
     // IMPORTANT:
     // The order is stored, and that is all that happens. No stock is touched
     // here - see the header of this file and contract 6.4.
+    // The customer travels inside the raw payload anyway; these two columns
+    // only surface it for the invoice flow and the debug views (contract 4.3).
+    const customer = customerOf(payload);
+    const taxId = taxIdOf(payload);
+
     this.db
       .prepare(
         `INSERT INTO orders
-           (id, order_number, idempotency_key, idempotency_suffix, status, currency, total, payload, received_at)
-         VALUES (?, ?, ?, ?, 'received', ?, ?, ?, ?)`,
+           (id, order_number, idempotency_key, idempotency_suffix, status, currency, total,
+            customer_name, customer_tax_id, payload, received_at)
+         VALUES (?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -195,6 +218,10 @@ export class OrderService {
         idempotencySuffix(idempotencyKey),
         payload.currency ?? null,
         payload.total ?? null,
+        typeof customer?.name === 'string' ? customer.name : null,
+        // Verbatim, whatever the type token was. Never normalised, never
+        // validated against a list of "known" formats.
+        taxId ? taxId.value : null,
         JSON.stringify(payload),
         receivedAt,
       );
@@ -414,6 +441,43 @@ export class OrderService {
   }
 }
 
+/**
+ * Shape-checks `customer` (contract 4.3) - LENIENTLY, and on purpose.
+ *
+ * A non-auth 4xx from POST /orders is NOT retried: WeAreDA routes the order to
+ * manual_review and a human has to pick it up. So the only thing rejected here
+ * is a `customer` that is genuinely unusable - present, but not an object.
+ *
+ * Everything else is accepted and stored verbatim. In particular this function
+ * NEVER rejects:
+ *
+ *   - a missing `customer` (an order with no contact is an ordinary order),
+ *   - `customer.tax_id: null` (the contact simply has no fiscal id),
+ *   - a missing `tax_id` key,
+ *   - an UNKNOWN `tax_id.type` - it is a free token, not an enum. `KENNITALA`
+ *     from Iceland must be accepted exactly like `CUIT`,
+ *   - a `tax_id.value` in a format this code has never seen, or one that fails
+ *     any check-digit rule you might be tempted to add.
+ *
+ * If you cannot invoice without a fiscal id, the answer is
+ * `syncConfig.orders.requiresTaxId: true` (contract 4.3.2), which stops the
+ * order being delivered at all until the tenant completes the contact. It is
+ * never a rejection on arrival.
+ */
+function validateCustomer(customer: unknown, details: string[]): void {
+  // Absent, or explicitly null: nothing to check, and nothing wrong.
+  if (customer === undefined || customer === null) return;
+
+  if (typeof customer !== 'object' || Array.isArray(customer)) {
+    details.push('customer must be an object when present');
+    return;
+  }
+
+  // Deliberately no check on tax_id beyond this point. A malformed one is
+  // treated as "no fiscal id" by taxIdOf() rather than as a reason to send the
+  // whole order to manual_review.
+}
+
 function toStoredOrder(row: OrderRow): StoredOrder {
   return {
     id: row.id,
@@ -422,6 +486,8 @@ function toStoredOrder(row: OrderRow): StoredOrder {
     status: row.status,
     currency: row.currency,
     total: row.total,
+    customer_name: row.customer_name,
+    customer_tax_id: row.customer_tax_id,
     payload: JSON.parse(row.payload) as OrderPayload,
     received_at: row.received_at,
     cancelled_at: row.cancelled_at,

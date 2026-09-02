@@ -10,6 +10,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import {
   ReadApiConfigurationError,
   WeAreDAResellerApiClient,
+  type ReadApiOrderDetail,
+  type ReadApiOrderList,
 } from '../src/weareda/reseller-api-client.js';
 import { testConfig } from './helpers.js';
 
@@ -80,6 +82,9 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
           .send({ error: 'test_connection_unavailable', reason: 'read_calls_disabled' }),
     );
 
+    // Contract 11.3: the list customer is minimal, and camelCase - `taxId`,
+    // not the `tax_id` of the pushed payload. The second item has no customer
+    // at all, which is an ordinary order.
     backend.get('/api/v1/resellers/me/tenants/:tenantId/orders', async () => ({
       items: [
         {
@@ -89,14 +94,44 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
           status: 'confirmed',
           integrationStatus: 'completed',
           total: 12100,
+          customer: {
+            id: 'customer-uuid',
+            name: 'Juan Perez',
+            email: 'juan@example.test',
+            phone: '+541100000000',
+            taxId: { type: 'CUIT', value: '20-12345678-9', country: 'AR' },
+          },
+        },
+        {
+          id: 'order-uuid-2',
+          externalOrderId: 'SO-10002',
+          total: 5000,
+          customer: {
+            id: 'customer-uuid-2',
+            name: 'No Fiscal Id',
+            // Null, not absent: the contact simply has none (contract 4.3).
+            taxId: null,
+          },
         },
       ],
       pagination: { nextCursor: 'eyJ0ZXN0IjoxfQ', hasMore: true },
     }));
 
+    // Contract 11.4: the detail customer adds firstName / lastName, and the
+    // type token is whatever the country uses - here Iceland's.
     backend.get('/api/v1/resellers/me/tenants/:tenantId/orders/:orderId', async (request) => ({
       id: (request.params as { orderId: string }).orderId,
       integrationStatus: 'completed',
+      customer: {
+        id: 'customer-uuid',
+        firstName: 'Juan',
+        lastName: 'Perez',
+        name: 'Juan Perez',
+        email: 'juan@example.test',
+        phone: '+541100000000',
+        taxId: { type: 'KENNITALA', value: '120174-3389', country: 'IS' },
+      },
+      billingAddress: { line1: '1 Example St', city: 'Example City', country: 'AR' },
       items: [{ sku: 'SKU-123', quantity: 2 }],
     }));
 
@@ -183,10 +218,49 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
   it('lists tenant orders', async () => {
     const response = await client().listOrders({ status: 'confirmed', limit: 25 });
     expect(response.statusCode).toBe(200);
-    expect((response.body as any).items).toHaveLength(1);
+    expect(response.body.items).toHaveLength(2);
     expect(calls[0]?.url).toContain('/api/v1/resellers/me/tenants/TENANT_ID/orders');
     expect(calls[0]?.url).toContain('status=confirmed');
     expect(calls[0]?.url).toContain('limit=25');
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* customer.taxId - camelCase on this plane (contract 11.3, 11.4)           */
+  /* ---------------------------------------------------------------------- */
+
+  it('parses customer.taxId on a list response - camelCase, not tax_id', async () => {
+    const response = await client().listOrders();
+    const body: ReadApiOrderList = response.body;
+
+    const [withTaxId, withoutTaxId] = body.items;
+    expect(withTaxId?.customer?.name).toBe('Juan Perez');
+    expect(withTaxId?.customer?.taxId).toEqual({
+      type: 'CUIT',
+      value: '20-12345678-9',
+      country: 'AR',
+    });
+    // `null` means the contact has no fiscal id. It is not an error, and not
+    // the same as the whole customer being absent.
+    expect(withoutTaxId?.customer?.taxId).toBeNull();
+    // The pushed payload's spelling must NOT appear on this plane.
+    expect((withTaxId?.customer as Record<string, unknown>).tax_id).toBeUndefined();
+  });
+
+  it('parses the detail customer, including an unknown taxId.type', async () => {
+    const response = await client().getOrder('order-uuid');
+    const body: ReadApiOrderDetail = response.body;
+
+    expect(body.customer?.firstName).toBe('Juan');
+    expect(body.customer?.lastName).toBe('Perez');
+    // Free token: a type nobody here has heard of parses exactly like CUIT.
+    expect(body.customer?.taxId?.type).toBe('KENNITALA');
+    expect(body.customer?.taxId?.country).toBe('IS');
+    expect(body.billingAddress?.city).toBe('Example City');
+  });
+
+  it('passes a tax id through the search filter (contract 11.3)', async () => {
+    await client().listOrders({ search: '20-12345678-9' });
+    expect(calls[0]?.url).toContain('search=20-12345678-9');
   });
 
   it('authenticates with X-Reseller-Key and nothing else', async () => {
@@ -214,8 +288,8 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
 
   it('fetches one order detail', async () => {
     const response = await client().getOrder('order-uuid');
-    expect((response.body as any).id).toBe('order-uuid');
-    expect((response.body as any).items).toHaveLength(1);
+    expect(response.body.id).toBe('order-uuid');
+    expect(response.body.items).toHaveLength(1);
   });
 
   it('fetches the invoices of an order', async () => {

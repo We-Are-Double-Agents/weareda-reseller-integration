@@ -51,6 +51,14 @@ Idempotency-Key: order:6b1e…
   "subtotal": 10000, "discount": 0, "tax": 0, "shipping": 500, "total": 10500,
   "notes": "leave at door",
   "shipping_address": { "name": "Ada", "line1": "…", "city": "…", "country": "AR" },
+  "customer": {
+    "id": "contact-uuid",
+    "name": "Ada Lovelace",
+    "first_name": "Ada", "last_name": "Lovelace",
+    "email": "ada@example.com",
+    "phone": "+541112345678",
+    "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+  },
   "idempotency_key": "order:6b1e…",
   "items": [
     {
@@ -68,13 +76,112 @@ Two things surprise people about this payload:
 
 1. **There is no `external_order_id`.** WeAreDA identifies the order by
    `order_number` and `idempotency_key`, and adopts *your* id from the response.
-2. **There is no customer object.** The shipping address carries the
-   recipient's name and whatever contact fields the tenant captured. Nothing
-   beyond what you need to fulfil the order is sent — no internal notes, no
-   payment tokens.
+2. **The `customer` object is optional in two independent ways, and its
+   `tax_id.type` is a free token, not an enum.** `customer` is omitted entirely
+   when the order has no contact; `customer.tax_id` is `null` when the contact
+   has no fiscal identification; and the values are a *snapshot* taken when the
+   order was created, not a live read of the contact. See
+   [The customer and its fiscal id](#the-customer-and-its-fiscal-id) below.
+
+Beyond that, nothing you do not need to fulfil and invoice the order is sent —
+no internal notes, no contact custom fields, no payment tokens.
 
 The item ids (`external_product_id`, `external_variant_id`) are the ids **you**
 gave WeAreDA in `/products`.
+
+---
+
+## The customer and its fiscal id
+
+Contract §4.3, added 2026-09. Purely **additive**: no field was renamed, removed
+or given a new meaning, the contract was **not** versioned for it (§9), and an
+integration written before it keeps working untouched. Do not make any of it
+required.
+
+```json
+"customer": {
+  "id": "contact-uuid",
+  "name": "Ada Lovelace",
+  "first_name": "Ada", "last_name": "Lovelace",
+  "email": "ada@example.com",
+  "phone": "+541112345678",
+  "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+}
+```
+
+| Case | On the wire | What it means |
+|---|---|---|
+| the order has no contact | **no `customer` key at all** | an ordinary order |
+| the contact has no fiscal id | `"tax_id": null` | an ordinary order |
+| the contact has one | `{ type, value, country }` | invoice against this |
+
+`tax_id` is **always present inside `customer`**, so you can branch on it
+without optional-chaining gymnastics — `null` is a real answer, not an absence.
+
+### `tax_id.type` is a free short token, not an enum
+
+`CUIT`, `CUIL`, `DNI`, `CPF`, `CNPJ`, `NIF`, `NIE`, `CIF`, `RFC`, `EIN`, `SSN`,
+`VAT`, `TAX_ID` — and whatever the next country uses. **Meeting a value you have
+never seen is normal.** Store it verbatim; never normalise it into a token you
+do recognise, never validate it against a list of "known" types, and never
+reject the order over it. `tax_id.country` is ISO 3166-1 alpha-2.
+
+`tests/orders.test.ts` pins this with an Icelandic `KENNITALA`, precisely so
+that adding an enum later fails the suite.
+
+### It is a snapshot, not a live read
+
+The values were copied onto the order **when it was created** (§4.3.1). If the
+tenant corrects the contact tomorrow, an order you already received — and
+possibly already invoiced — keeps the identity it was created with; only new
+orders carry the new value. An invoice is issued against a fiscal identity, and
+that identity must not change retroactively, so **never "correct" a stored order
+from a later read** of the customer.
+
+One exception, in your favour: an order that arrived with **no** fiscal id may
+later report one, because WeAreDA fills that gap from the contact. The snapshot
+freezes a *value*, not an *absence*.
+
+### If you cannot invoice without one
+
+Set `syncConfig.orders.requiresTaxId: true` at connect time (§4.3.2, §7):
+
+```bash
+npm run cli -- integration:connect --requires-tax-id
+```
+
+WeAreDA then **never delivers** an order whose customer has no fiscal id — it is
+simply not yet eligible — and delivers it automatically, within a minute, once
+the tenant completes the contact. Nothing is parked and nothing has to be
+re-queued. Default is `false`, which is what every existing integration keeps.
+
+> **The lesson.** A reseller that cannot invoice without a fiscal id sets *that
+> flag*. It does **not** reject orders on arrival: a non-auth `4xx` is not
+> retried, so rejecting turns an order that would have arrived complete into a
+> manual-review ticket.
+
+### Treat it as sensitive
+
+A fiscal identifier is sensitive customer data. WeAreDA masks it in its
+operational logs (`20-******78-9`) and §11.8 asks you to do the same. This
+sandbox prints full bodies on purpose — and makes this the one deliberate
+exception:
+
+| Where | What you see |
+|---|---|
+| the request log, `GET /debug/events`, `GET /debug/orders` | `20-******78-9` |
+| the CLI, including `invoice` and `orders:list` | `20-******78-9` |
+| the stored order (`orders.customer_tax_id`, `payload`) | the real value |
+
+The store keeps the real value because you cannot invoice against a masked one.
+Everything that *renders* an order masks it, via `maskTaxId` / `maskTaxIds` in
+[`src/lib/redact.ts`](../src/lib/redact.ts).
+
+### It changes no behaviour
+
+The customer object is data. It does not gate acceptance, it does not move a
+status, and — like everything else on this page — it does not touch stock
+(§6.4). See [stock.md](stock.md).
 
 ### What to return
 
@@ -129,10 +236,17 @@ This reference rejects, with `400`:
 - an item with no `external_product_id`, `external_variant_id` or `sku`
 - an item with a non-positive `quantity`
 - an order with neither `order_number` nor `idempotency_key`
+- a `customer` that is present but not an object (a string, an array) — the only
+  genuinely unusable shape
 
 Everything else is accepted and stored verbatim. Be conservative here: a
 non-auth `4xx` is **not retried**, so a strict validator turns a recoverable
 hiccup into a manual-review ticket.
+
+It explicitly does **not** reject: a missing `customer`, `customer.tax_id: null`,
+a missing `tax_id` key, an unknown `tax_id.type`, or a `tax_id.value` in a format
+it has never seen. A `tax_id` it cannot read is treated as *no fiscal id*, not as
+a reason to send the order to a human.
 
 ---
 

@@ -30,7 +30,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\"\n}",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -53,7 +53,7 @@
                 "connect"
               ]
             },
-            "description": "The default shape: WeAreDA reads your catalog on a schedule AND delivers orders to you.\n\nYou implement all four calls: GET /, GET /products, POST /orders, POST /orders/{id}/cancel.\n\nThe response echoes integrationMode, orderDeliveryEnabled and productsSyncMode, and captures webhookUrl into the collection variable used by folders 05-08."
+            "description": "The default shape: WeAreDA reads your catalog on a schedule AND delivers orders to you.\n\nYou implement all four calls: GET /, GET /products, POST /orders, POST /orders/{id}/cancel.\n\nThe response echoes integrationMode, orderDeliveryEnabled and productsSyncMode, and captures webhookUrl into the collection variable used by folders 05-08.\n\nsyncConfig.orders.requiresTaxId (contract 4.3.2, 7) - a boolean, default\nfalse, which is the behaviour every existing integration keeps.\n\ntrue means WeAreDA NEVER delivers an order whose customer has no fiscal\nidentifier: the order is simply not yet eligible, and it is delivered\nautomatically - within a minute - once the tenant completes the contact.\nNothing is parked and nothing has to be re-queued.\n\nThat is the setting for a reseller that cannot invoice without a tax id.\nRejecting such orders on arrival is the wrong answer: a non-auth 4xx is not\nretried, so it turns a waiting order into a manual-review ticket.\n\nUnlike integrationMode and orderStatusWrite, this one IS a syncConfig option -\nit configures a delivery rule, not the shape of the integration. A non-boolean\nvalue is 400 invalid_sync_config."
           },
           "response": [],
           "event": [
@@ -1097,10 +1097,10 @@
                 "orders"
               ]
             },
-            "description": "Direction: WeAreDA -> Reseller.\n\nThe delivered order. Note it carries NO external_order_id: WeAreDA identifies it by order_number + idempotency_key, and adopts YOUR id from the response.\n\nSaves the returned id into the `orderId` variable.",
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe delivered order. Note it carries NO external_order_id: WeAreDA identifies it by order_number + idempotency_key, and adopts YOUR id from the response.\n\nSaves the returned id into the `orderId` variable.\n\nThe `customer` object (contract 4.3, added 2026-09) is OPTIONAL and ADDITIVE:\n  - the whole key is OMITTED when the order has no contact;\n  - customer.tax_id is NULL when the contact has no fiscal identification - the\n    key is always present INSIDE customer, so you can branch on it directly;\n  - tax_id.type is a FREE SHORT TOKEN, not an enum (CUIT, CUIL, DNI, CPF, CNPJ,\n    NIF, NIE, CIF, RFC, EIN, SSN, VAT, TAX_ID, ...). An unknown value is normal:\n    accept it verbatim, never normalise it, NEVER reject the order over it;\n  - tax_id.country is ISO 3166-1 alpha-2;\n  - the values are a SNAPSHOT taken when the order was created (4.3.1). Do not\n    expect them to match a later read of the customer, and never 'correct' a\n    stored order from one. An order that arrived with no fiscal id may report\n    one later - the snapshot freezes a value, not an absence.\n\nIf you cannot invoice without a fiscal id, set syncConfig.orders.requiresTaxId:\ntrue (4.3.2, folder 00) - WeAreDA then never delivers such an order, and\ndelivers it automatically within a minute of the tenant completing the contact.\nRejecting the delivery is the wrong answer: a non-auth 4xx is not retried.\n\nThe identifier below is deliberately fake. The sandbox MASKS it in every log\nline and in GET /debug/orders (20-******78-9) and keeps the real value only on\nthe order it invoices against (11.8).",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"customer\": {\n    \"id\": \"contact-0000-example\",\n    \"name\": \"Ada Lovelace\",\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada@example.test\",\n    \"phone\": \"+541100000000\",\n    \"tax_id\": {\n      \"type\": \"CUIT\",\n      \"value\": \"20-12345678-9\",\n      \"country\": \"AR\"\n    }\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1160,10 +1160,10 @@
                 "orders"
               ]
             },
-            "description": "Direction: WeAreDA -> Reseller.\n\nThe SAME Idempotency-Key again. This reference returns 200 with the existing order (contract 4.3 also allows 409, but a 409 carries no id, so WeAreDA stores no external_order_id from it).",
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe SAME Idempotency-Key again. This reference returns 200 with the existing order (contract 4.3 also allows 409, but a 409 carries no id, so WeAreDA stores no external_order_id from it).\n\nThe `customer` object (contract 4.3, added 2026-09) is OPTIONAL and ADDITIVE:\n  - the whole key is OMITTED when the order has no contact;\n  - customer.tax_id is NULL when the contact has no fiscal identification - the\n    key is always present INSIDE customer, so you can branch on it directly;\n  - tax_id.type is a FREE SHORT TOKEN, not an enum (CUIT, CUIL, DNI, CPF, CNPJ,\n    NIF, NIE, CIF, RFC, EIN, SSN, VAT, TAX_ID, ...). An unknown value is normal:\n    accept it verbatim, never normalise it, NEVER reject the order over it;\n  - tax_id.country is ISO 3166-1 alpha-2;\n  - the values are a SNAPSHOT taken when the order was created (4.3.1). Do not\n    expect them to match a later read of the customer, and never 'correct' a\n    stored order from one. An order that arrived with no fiscal id may report\n    one later - the snapshot freezes a value, not an absence.\n\nIf you cannot invoice without a fiscal id, set syncConfig.orders.requiresTaxId:\ntrue (4.3.2, folder 00) - WeAreDA then never delivers such an order, and\ndelivers it automatically within a minute of the tenant completing the contact.\nRejecting the delivery is the wrong answer: a non-auth 4xx is not retried.\n\nThe identifier below is deliberately fake. The sandbox MASKS it in every log\nline and in GET /debug/orders (20-******78-9) and keeps the real value only on\nthe order it invoices against (11.8).",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"customer\": {\n    \"id\": \"contact-0000-example\",\n    \"name\": \"Ada Lovelace\",\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada@example.test\",\n    \"phone\": \"+541100000000\",\n    \"tax_id\": {\n      \"type\": \"CUIT\",\n      \"value\": \"20-12345678-9\",\n      \"country\": \"AR\"\n    }\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1190,6 +1190,126 @@
               }
             }
           ]
+        },
+        {
+          "name": "POST /orders (UNKNOWN tax_id.type -> accepted verbatim)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:kennitala"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nKENNITALA is Iceland's national identifier. Nothing in this repository has\nheard of it, and the order is accepted anyway, with the token stored exactly\nas it arrived.\n\ntax_id.type is a FREE SHORT TOKEN, not an enum (contract 4.3). Meeting a\nvalue you do not recognise is NORMAL. Never reject it, never normalise it\ninto a type you do know, and never add a list of 'valid' types - the next\ncountry will not be on it.\n\nCheck GET /debug/orders afterwards: the order is there, with its tax id\nmasked in the view and stored in full underneath.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1043\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"customer\": {\n    \"id\": \"contact-0002-example\",\n    \"name\": \"Example Customer IS\",\n    \"email\": \"unknown-type@example.test\",\n    \"tax_id\": {\n      \"type\": \"KENNITALA\",\n      \"value\": \"120174-3389\",\n      \"country\": \"IS\"\n    }\n  },\n  \"idempotency_key\": \"order:kennitala\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /orders (customer with tax_id: null -> accepted)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:no-tax-id"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe contact has no fiscal identification, so tax_id is NULL. The key is\nalways present inside customer, so branching on it needs no guessing\n(contract 4.3).\n\nThis is an ordinary order and must be accepted. A 4xx here is not retried:\nit would route the order to manual_review for a human to rescue.\n\nIf your billing cannot issue an invoice without a fiscal id, the answer is\nsyncConfig.orders.requiresTaxId: true (contract 4.3.2, folder 00) - WeAreDA\nthen holds the order back and delivers it automatically, within a minute, as\nsoon as the tenant completes the contact. Nothing is parked or re-queued.\n\nRun `npm run cli -- invoice <id>` on the created order to see what the\ninvoice flow prints when there is no fiscal identity.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1044\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"customer\": {\n    \"id\": \"contact-0003-example\",\n    \"name\": \"Example Customer Without A Fiscal Id\",\n    \"email\": \"no-tax-id@example.test\",\n    \"tax_id\": null\n  },\n  \"idempotency_key\": \"order:no-tax-id\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /orders (no customer key at all -> accepted)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{resellerApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "order:no-customer"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{resellerBaseUrl}}/orders",
+              "host": [
+                "{{resellerBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Direction: WeAreDA -> Reseller.\n\nThe order has no contact, so the whole customer object is OMITTED - exactly\nthe payload an integration written before 2026-09 has always received.\n\nThe change is additive and the contract was NOT versioned for it (contract\n9): no field was renamed, removed or given a new meaning, so an integration\nwritten before it keeps working untouched. Never make customer required.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"order_number\": \"ORD-1045\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:no-customer\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
         },
         {
           "name": "POST /orders (malformed -> 400)",
@@ -3513,10 +3633,10 @@
                 "orders"
               ]
             },
-            "description": "Direction: WeAreDA -> Reseller.\n\nRun it as many times as you like: the order count never grows. Check GET /debug/orders.",
+            "description": "Direction: WeAreDA -> Reseller.\n\nRun it as many times as you like: the order count never grows. Check GET /debug/orders.\n\nThe `customer` object (contract 4.3, added 2026-09) is OPTIONAL and ADDITIVE:\n  - the whole key is OMITTED when the order has no contact;\n  - customer.tax_id is NULL when the contact has no fiscal identification - the\n    key is always present INSIDE customer, so you can branch on it directly;\n  - tax_id.type is a FREE SHORT TOKEN, not an enum (CUIT, CUIL, DNI, CPF, CNPJ,\n    NIF, NIE, CIF, RFC, EIN, SSN, VAT, TAX_ID, ...). An unknown value is normal:\n    accept it verbatim, never normalise it, NEVER reject the order over it;\n  - tax_id.country is ISO 3166-1 alpha-2;\n  - the values are a SNAPSHOT taken when the order was created (4.3.1). Do not\n    expect them to match a later read of the customer, and never 'correct' a\n    stored order from one. An order that arrived with no fiscal id may report\n    one later - the snapshot freezes a value, not an absence.\n\nIf you cannot invoice without a fiscal id, set syncConfig.orders.requiresTaxId:\ntrue (4.3.2, folder 00) - WeAreDA then never delivers such an order, and\ndelivers it automatically within a minute of the tenant completing the contact.\nRejecting the delivery is the wrong answer: a non-auth 4xx is not retried.\n\nThe identifier below is deliberately fake. The sandbox MASKS it in every log\nline and in GET /debug/orders (20-******78-9) and keeps the real value only on\nthe order it invoices against (11.8).",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
+              "raw": "{\n  \"order_number\": \"ORD-1042\",\n  \"currency\": \"USD\",\n  \"subtotal\": 10000,\n  \"discount\": 0,\n  \"tax\": 0,\n  \"shipping\": 500,\n  \"total\": 10500,\n  \"notes\": \"leave at door\",\n  \"shipping_address\": {\n    \"name\": \"Ada\",\n    \"line1\": \"1 Example Street\",\n    \"city\": \"Example City\",\n    \"country\": \"AR\"\n  },\n  \"customer\": {\n    \"id\": \"contact-0000-example\",\n    \"name\": \"Ada Lovelace\",\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada@example.test\",\n    \"phone\": \"+541100000000\",\n    \"tax_id\": {\n      \"type\": \"CUIT\",\n      \"value\": \"20-12345678-9\",\n      \"country\": \"AR\"\n    }\n  },\n  \"idempotency_key\": \"order:6b1e\",\n  \"items\": [\n    {\n      \"sku\": \"WIDGET-PRO-S\",\n      \"external_product_id\": \"P-1002\",\n      \"external_variant_id\": \"V-2001\",\n      \"name\": \"Widget Pro\",\n      \"variant_name\": \"Small / Black\",\n      \"quantity\": 2,\n      \"unit_price\": 5000,\n      \"discount\": 0,\n      \"subtotal\": 10000\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

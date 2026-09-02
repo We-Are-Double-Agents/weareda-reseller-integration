@@ -11,6 +11,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { logInboundRequest } from '../lib/logger.js';
+import { maskTaxIds } from '../lib/redact.js';
 import type { EventLog } from '../services/event-log.js';
 
 declare module 'fastify' {
@@ -38,13 +39,21 @@ export function registerRequestLogging(app: FastifyInstance, eventLog: EventLog)
     const responseBody = isJson && typeof payload === 'string' ? safeParse(payload) : undefined;
     const idempotencyKey = headerValue(request.headers['idempotency-key']);
 
+    // The sandbox prints full bodies on purpose - that is the point of a
+    // reference implementation. A customer's fiscal identifier is the one
+    // deliberate exception: it is masked here and in the history below, the
+    // same way WeAreDA masks it (contract 11.8). The order itself is stored
+    // with the real value; only what is RENDERED is masked.
+    const loggedRequestBody = maskTaxIds(request.body);
+    const loggedResponseBody = maskTaxIds(responseBody);
+
     logInboundRequest({
       method: request.method,
       url: request.url,
       headers: request.headers as Record<string, unknown>,
-      body: request.body,
+      body: loggedRequestBody,
       statusCode: reply.statusCode,
-      responseBody: responseBody ?? `(${contentType || 'no content-type'})`,
+      responseBody: loggedResponseBody ?? `(${contentType || 'no content-type'})`,
       durationMs: Math.round(durationMs),
       notes: request.logNotes,
     });
@@ -55,8 +64,8 @@ export function registerRequestLogging(app: FastifyInstance, eventLog: EventLog)
       idempotencyKey,
       statusCode: reply.statusCode,
       durationMs,
-      requestBody: request.body,
-      responseBody,
+      requestBody: loggedRequestBody,
+      responseBody: loggedResponseBody,
       note: request.logNotes?.length ? request.logNotes.join(' | ') : null,
     });
 

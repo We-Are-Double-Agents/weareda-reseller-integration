@@ -15,6 +15,7 @@ import {
 import { WeAreDAWebhookClient } from '../src/weareda/webhook-client.js';
 import { buildStockUpdatedEvent } from '../src/weareda/events.js';
 import { setLogLevel } from '../src/lib/logger.js';
+import { maskTaxId } from '../src/lib/redact.js';
 
 describe('event history and debug endpoints', () => {
   let sandbox: TestSandbox;
@@ -67,6 +68,66 @@ describe('event history and debug endpoints', () => {
     const dump = JSON.stringify(sandbox.eventLog.outbound(10));
     expect(dump).not.toContain(sandbox.config.webhook.secret);
     expect(dump.toLowerCase()).not.toContain('sha256=');
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* Fiscal identifiers (contract 4.3, 11.8)                                  */
+  /* ---------------------------------------------------------------------- */
+
+  describe("a customer's fiscal identifier never reaches the history", () => {
+    const FULL = '20-12345678-9';
+    const MASKED = '20-******78-9';
+
+    it('masks the identifier the way WeAreDA does', () => {
+      expect(maskTaxId(FULL)).toBe(MASKED);
+      // Separators preserved, first two and last three alphanumerics kept.
+      expect(maskTaxId('AB123456789Z')).toBe('AB*******89Z');
+      expect(maskTaxId('12.345.678-9')).toBe('12.***.*78-9');
+      // Too short to mask partially: hidden completely rather than leaked.
+      expect(maskTaxId('1234')).toBe('****');
+      expect(maskTaxId(null)).toBe('(none)');
+    });
+
+    it('stores the masked form, never the digits, in the inbound history', async () => {
+      await sandbox.app.inject({
+        method: 'POST',
+        url: '/orders',
+        headers: authHeaders({ 'idempotency-key': 'order:6b1e' }),
+        payload: orderPayload(),
+      });
+
+      const dump = JSON.stringify(sandbox.eventLog.inbound(10));
+      expect(dump).not.toContain(FULL);
+      expect(dump).not.toMatch(/12345678/);
+      expect(dump).toContain(MASKED);
+    });
+
+    it('keeps the REAL value on the order itself - you invoice against it', async () => {
+      const response = await sandbox.app.inject({
+        method: 'POST',
+        url: '/orders',
+        headers: authHeaders({ 'idempotency-key': 'order:6b1e' }),
+        payload: orderPayload(),
+      });
+
+      const stored = sandbox.orders.findById(response.json().id);
+      expect(stored?.customer_tax_id).toBe(FULL);
+      expect(stored?.payload.customer?.tax_id?.value).toBe(FULL);
+    });
+
+    it('masks it in the debug order view too', async () => {
+      await sandbox.app.inject({
+        method: 'POST',
+        url: '/orders',
+        headers: authHeaders({ 'idempotency-key': 'order:6b1e' }),
+        payload: orderPayload(),
+      });
+
+      const debug = await sandbox.app.inject({ method: 'GET', url: '/debug/orders' });
+      const dump = JSON.stringify(debug.json());
+      expect(dump).not.toMatch(/12345678/);
+      expect(dump).toContain(MASKED);
+    });
   });
 
   it('exposes orders, products and events as JSON', async () => {

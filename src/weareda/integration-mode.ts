@@ -270,7 +270,24 @@ export interface SyncConfig {
     itemsKey?: string | null;
     fieldMap?: Record<string, string>;
   };
-  orders?: { path?: string; idempotencyHeader?: string; orderIdField?: string };
+  orders?: {
+    path?: string;
+    idempotencyHeader?: string;
+    orderIdField?: string;
+    /**
+     * Contract 4.3.2 / 7 - OPT-IN, default `false`.
+     *
+     * `true` means WeAreDA never delivers an order whose customer has no
+     * fiscal identifier: the order is simply not yet eligible, and it is
+     * delivered automatically - within a minute - once the tenant completes
+     * the contact. Nothing is parked and nothing has to be re-queued.
+     *
+     * This is the answer for a reseller that cannot invoice without a tax id.
+     * The wrong answer is rejecting such orders on arrival: a non-auth 4xx is
+     * not retried, so it turns a waiting order into a manual-review ticket.
+     */
+    requiresTaxId?: boolean;
+  };
   documentHosts?: string[];
   enabled?: boolean;
   frequency?: 'hourly' | 'daily' | 'weekly';
@@ -298,7 +315,7 @@ const SYNC_PRODUCTS_KEYS = [
   'fieldMap',
 ] as const;
 
-const SYNC_ORDERS_KEYS = ['path', 'idempotencyHeader', 'orderIdField'] as const;
+const SYNC_ORDERS_KEYS = ['path', 'idempotencyHeader', 'orderIdField', 'requiresTaxId'] as const;
 
 /**
  * Top-level keys WeAreDA knows. Everything else at the top level is DROPPED
@@ -445,6 +462,14 @@ export function validateConnectBody(
           if (!(SYNC_ORDERS_KEYS as readonly string[]).includes(key)) {
             invalidSync(`syncConfig.orders.${key} is not a known option.`);
           }
+        }
+        // Contract 7: a boolean, like orderStatusWrite. The string "true" is
+        // not a boolean here either.
+        if (orders.requiresTaxId !== undefined && typeof orders.requiresTaxId !== 'boolean') {
+          invalidSync(
+            `syncConfig.orders.requiresTaxId must be a boolean ` +
+              `(received ${JSON.stringify(orders.requiresTaxId)}). Default is false.`,
+          );
         }
       }
     }

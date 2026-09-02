@@ -32,11 +32,98 @@ export interface OrderListFilters {
   updatedFrom?: string;
   updatedTo?: string;
   hasInvoice?: boolean;
+  /**
+   * Free-text match over the order number, the customer's name/email/phone -
+   * and, since 2026-09, their fiscal identifier (contract 11.3).
+   */
   search?: string;
   /** Default 25, max 100 (contract 11.3). */
   limit?: number;
   /** Opaque keyset cursor from pagination.nextCursor of the previous page. */
   cursor?: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Order projections (contract 11.3, 11.4)                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * ============================================================================
+ * TWO CONVENTIONS FOR THE SAME DATA - DO NOT SHARE ONE TYPE
+ * ============================================================================
+ * The order WeAreDA PUSHES to us (contract 4.3, weareda/types.ts) is
+ * snake_case: `tax_id`, `first_name`. The order we PULL back from this read
+ * API (contract 11) is camelCase: `taxId`, `firstName`.
+ *
+ * Same data, two conventions, because each side follows its own existing
+ * style. They are modelled as separate types on purpose: a shared one would
+ * only be right on one of the two planes, and the mismatch would be found at
+ * runtime instead of here.
+ * ============================================================================
+ */
+export interface ReadApiTaxId {
+  /** A free short token, not an enum - see TaxId in weareda/types.ts. */
+  type: string;
+  value: string;
+  /** ISO 3166-1 alpha-2. */
+  country?: string;
+}
+
+/** 11.3 - the minimal customer of a LIST item. `taxId` is null when unset. */
+export interface ReadApiOrderListCustomer {
+  id?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  taxId?: ReadApiTaxId | null;
+}
+
+/** 11.4 - the DETAIL customer adds the split name. Still no contact internals. */
+export interface ReadApiOrderDetailCustomer extends ReadApiOrderListCustomer {
+  firstName?: string;
+  lastName?: string;
+}
+
+export interface ReadApiAddress {
+  line1?: string;
+  line2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+}
+
+export interface ReadApiOrderListItem {
+  id: string;
+  tenantId?: string;
+  externalOrderId?: string | null;
+  orderNumber?: string;
+  status?: string;
+  integrationStatus?: string;
+  currency?: string;
+  subtotal?: number;
+  discount?: number;
+  tax?: number;
+  shipping?: number;
+  total?: number;
+  /** Absent for an order with no contact (contract 4.3). */
+  customer?: ReadApiOrderListCustomer;
+  itemsCount?: number;
+  invoiceCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ReadApiOrderList {
+  items: ReadApiOrderListItem[];
+  pagination?: { nextCursor?: string | null; hasMore?: boolean };
+}
+
+export interface ReadApiOrderDetail extends Omit<ReadApiOrderListItem, 'customer'> {
+  customer?: ReadApiOrderDetailCustomer;
+  billingAddress?: ReadApiAddress;
+  shippingAddress?: ReadApiAddress;
+  items?: Array<Record<string, unknown>>;
 }
 
 export interface ReadApiResponse<T = unknown> {
@@ -126,23 +213,35 @@ export class WeAreDAResellerApiClient {
   /* Orders (contract 11)                                                     */
   /* ---------------------------------------------------------------------- */
 
-  /** GET /api/v1/resellers/me/tenants/{tenantId}/orders */
-  async listOrders(filters: OrderListFilters = {}): Promise<ReadApiResponse> {
+  /**
+   * GET /api/v1/resellers/me/tenants/{tenantId}/orders
+   *
+   * Items carry a minimal `customer` including `taxId` - camelCase here, and
+   * `tax_id` on the pushed payload (contract 11.3 vs 4.3).
+   */
+  async listOrders(filters: OrderListFilters = {}): Promise<ReadApiResponse<ReadApiOrderList>> {
     const { tenantId } = this.requireConfig();
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(filters)) {
       if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
     }
     const suffix = query.size > 0 ? `?${query.toString()}` : '';
-    return this.get(`/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/orders${suffix}`);
+    return this.get(
+      `/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/orders${suffix}`,
+    ) as Promise<ReadApiResponse<ReadApiOrderList>>;
   }
 
-  /** GET /api/v1/resellers/me/tenants/{tenantId}/orders/{orderId} */
-  async getOrder(orderId: string): Promise<ReadApiResponse> {
+  /**
+   * GET /api/v1/resellers/me/tenants/{tenantId}/orders/{orderId}
+   *
+   * The detail customer adds `firstName` / `lastName` and the billing address
+   * (contract 11.4).
+   */
+  async getOrder(orderId: string): Promise<ReadApiResponse<ReadApiOrderDetail>> {
     const { tenantId } = this.requireConfig();
     return this.get(
       `/api/v1/resellers/me/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(orderId)}`,
-    );
+    ) as Promise<ReadApiResponse<ReadApiOrderDetail>>;
   }
 
   /** GET /api/v1/resellers/me/tenants/{tenantId}/orders/{orderId}/invoices */

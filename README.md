@@ -364,7 +364,7 @@ Full detail in [docs/authentication.md](docs/authentication.md).
 |---|---|---|---|---|
 | `GET` | `/` | §4.1 | modes that **read** | Connection test. Any 2xx passes. |
 | `GET` | `/products` | §4.2 | modes that **read** | Catalog + stock pull. `page`, `limit`, `updated_since`. |
-| `POST` | `/orders` | §4.3 | modes that **deliver** | Order delivery. Idempotent. Always returns the order id. |
+| `POST` | `/orders` | §4.3 | modes that **deliver** | Order delivery. Idempotent. Always returns the order id. Carries an optional `customer` with the contact's fiscal id. |
 | `POST` | `/orders/{externalOrderId}/cancel` | §4.4 | modes that **deliver** | Cancellation by the id you returned. |
 | `POST` | `/orders/cancel` | §4.4 | modes that **deliver** | Fallback: match by `order_number` or `idempotency_key`. |
 
@@ -378,6 +378,64 @@ Local helpers that are **not** part of the contract:
 |---|---|---|
 | `GET` | `/healthz` | Unauthenticated liveness probe (Docker, load balancers). |
 | `GET` | `/fixtures/invoices/demo.pdf` | The demo invoice PDF, so `document_url` is fetchable. |
+
+### The delivered order (§4.3)
+
+```json
+{
+  "order_number": "ORD-1042",
+  "currency": "USD",
+  "subtotal": 10000, "discount": 0, "tax": 0, "shipping": 500, "total": 10500,
+  "notes": "leave at door",
+  "shipping_address": { "name": "Ada", "line1": "…", "city": "…", "country": "AR" },
+  "customer": {
+    "id": "contact-uuid",
+    "name": "Ada Lovelace",
+    "first_name": "Ada", "last_name": "Lovelace",
+    "email": "ada@example.com",
+    "phone": "+541112345678",
+    "tax_id": { "type": "CUIT", "value": "20-12345678-9", "country": "AR" }
+  },
+  "idempotency_key": "order:6b1e…",
+  "items": [
+    {
+      "sku": "WIDGET-BLK-S",
+      "external_product_id": "P-1001", "external_variant_id": "V-1",
+      "name": "Black Widget", "variant_name": "Small",
+      "quantity": 2, "unit_price": 5000, "discount": 0, "subtotal": 10000
+    }
+  ]
+}
+```
+
+There is **no `external_order_id`**: WeAreDA identifies the order by
+`order_number` + `idempotency_key` and adopts *your* id from the response.
+
+The **`customer`** object (added 2026-09, purely additive — the contract was not
+versioned for it, §9) is optional in two independent ways, and both paths must
+work:
+
+- the whole key is **omitted** when the order has no contact;
+- `customer.tax_id` is **`null`** when the contact has no fiscal identification —
+  the key is always present *inside* `customer`, so you can branch on it;
+- `tax_id.type` is a **free short token, not an enum** (`CUIT`, `CPF`, `NIF`,
+  `RFC`, `KENNITALA`, …). An unknown value is normal: accept it verbatim;
+- the values are a **snapshot** taken when the order was created (§4.3.1), not a
+  live read of the contact.
+
+**Never reject an order for a missing or unknown fiscal id.** If you cannot
+invoice without one, set `syncConfig.orders.requiresTaxId: true` (§4.3.2) —
+WeAreDA then holds the order back and delivers it automatically, within a
+minute, once the tenant completes the contact:
+
+```bash
+npm run cli -- integration:connect --requires-tax-id
+```
+
+Fiscal identifiers are sensitive (§11.8). The sandbox keeps the real value on
+the stored order — you invoice against it — and prints `20-******78-9` in every
+log line, in `GET /debug/orders` and in every CLI command. Full detail in
+[docs/orders.md](docs/orders.md#the-customer-and-its-fiscal-id).
 | `GET` | `/fixtures/products/*.png` | The sample product images, also hosted at `cdn.weareda.com/demo/products/`. |
 | `GET` | `/debug/orders`, `/debug/products`, `/debug/events` | JSON inspection. |
 
@@ -412,8 +470,8 @@ npm run cli -- <command> [args] [--dry-run] [--event-id evt_...]
 | `stock <id> <qty> [...]` | `stock.updated` | `npm run cli -- stock P-1001 37 V-2001 5` |
 | `order-status <orderId> <state>` | `order.status` | `npm run cli -- order-status SO-10001 shipped` |
 | `product-update <ids...> \| --all` | `product.updated` | `npm run cli -- product-update --all` |
-| `invoice <orderId>` | `invoice.issued` | `npm run cli -- invoice SO-10001` |
-| `integration:connect [--mode M] [--order-status-write]` | — | connect API (contract §1.1/§2) |
+| `invoice <orderId>` | `invoice.issued` | `npm run cli -- invoice SO-10001` — prints the fiscal identity it invoices against, masked |
+| `integration:connect [--mode M] [--order-status-write] [--requires-tax-id]` | — | connect API (contract §1.1/§2), plus `syncConfig.orders.requiresTaxId` (§4.3.2) |
 | `integration:status` | — | echoes mode, delivery, sync mode |
 | `integration:test` | — | `422 read_calls_disabled` in a `receive_*` mode |
 | `orders:list` | — | read API (contract §11) |
@@ -515,7 +573,9 @@ curl http://localhost:3000/debug/events    # inbound requests AND outbound webho
 ```
 
 `/debug/events` is the integration diary: event ids, idempotency keys, response
-statuses, timings, dry-run flags. Credentials and signatures are never stored.
+statuses, timings, dry-run flags. Credentials and signatures are never stored,
+and customers' fiscal identifiers are masked (`20-******78-9`, §11.8) — the real
+value stays on the stored order, which is what the invoice flow reads.
 
 Gate them with `ENABLE_DEBUG_ENDPOINTS=false` when you don't want them.
 
@@ -643,10 +703,10 @@ tests/                     vitest suite
 | [docs/authentication.md](docs/authentication.md) | The three credentials, in detail |
 | [docs/integration-modes.md](docs/integration-modes.md) | `integrationMode`, `orderStatusWrite`, `declaredCapabilities` — values, defaults, placement, every `400` |
 | [docs/products.md](docs/products.md) | Catalog pull, push, pagination, `updated_since` |
-| [docs/orders.md](docs/orders.md) | Delivery, idempotency, cancellation, `order.status` and its two status columns |
+| [docs/orders.md](docs/orders.md) | Delivery, idempotency, cancellation, the `customer` object and its fiscal id, `order.status` and its two status columns |
 | [docs/stock.md](docs/stock.md) | Absolute quantities, batching, independence from orders |
 | [docs/webhooks.md](docs/webhooks.md) | Signing, event ids, retries, dedup, one type per request |
-| [docs/invoices.md](docs/invoices.md) | `invoice.issued` and the document fetch |
+| [docs/invoices.md](docs/invoices.md) | `invoice.issued`, the fiscal identity you invoice against, and the document fetch |
 | [docs/testing.md](docs/testing.md) | The test suite, and how to test against WeAreDA |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Every error you are likely to hit |
 
@@ -658,6 +718,9 @@ reference it rather than restating it.
 ## Safety
 
 Everything in this repository is sample data: `demo_secret`, `whsec_example`,
-`rsk_example`, `P-1001`, `SO-10001`, `TENANT_ID`, `cdn.example.com`. There are
-no real credentials, tenant ids, customers or production URLs. Your `.env` is
+`rsk_example`, `P-1001`, `SO-10001`, `TENANT_ID`, `cdn.example.com`, and the
+deliberately fake fiscal identifier `20-12345678-9`. There are no real
+credentials, tenant ids, customers, tax ids or production URLs — and a real one
+would never be written to a log or a fixture anyway; see
+[docs/orders.md](docs/orders.md#treat-it-as-sensitive). Your `.env` is
 gitignored — keep it that way.

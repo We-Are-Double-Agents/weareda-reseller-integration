@@ -4,9 +4,16 @@
  * Stored so you can answer "what actually happened during that test?" after the
  * fact. Credentials, signatures and HMAC secrets are never written here - only
  * ids, statuses, timings and payloads.
+ *
+ * One payload field is masked rather than stored: a customer's fiscal
+ * identifier (contract 11.8). Callers already mask before they get here; this
+ * module masks again on the way in, so that a caller who forgets still cannot
+ * put a full identifier into the history. The reseller's `orders` table is
+ * where the real value lives.
  */
 import type { Database } from '../storage/db.js';
 import { isoNow, newTraceId } from '../lib/ids.js';
+import { maskTaxIds } from '../lib/redact.js';
 
 export interface InboundRecord {
   id: string;
@@ -64,8 +71,8 @@ export class EventLog {
         entry.idempotencyKey ?? null,
         entry.statusCode,
         Math.round(entry.durationMs),
-        entry.requestBody === undefined ? null : JSON.stringify(entry.requestBody),
-        entry.responseBody === undefined ? null : JSON.stringify(entry.responseBody),
+        entry.requestBody === undefined ? null : JSON.stringify(maskTaxIds(entry.requestBody)),
+        entry.responseBody === undefined ? null : JSON.stringify(maskTaxIds(entry.responseBody)),
         entry.note ?? null,
       );
     return id;
@@ -108,8 +115,8 @@ export class EventLog {
         entry.deduped ? 1 : 0,
         entry.error ?? null,
         entry.dryRun ? 1 : 0,
-        JSON.stringify(entry.payload),
-        entry.responseBody === undefined ? null : JSON.stringify(entry.responseBody),
+        JSON.stringify(maskTaxIds(entry.payload)),
+        entry.responseBody === undefined ? null : JSON.stringify(maskTaxIds(entry.responseBody)),
       );
   }
 
