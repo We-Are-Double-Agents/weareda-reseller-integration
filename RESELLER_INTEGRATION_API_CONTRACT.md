@@ -524,7 +524,9 @@ inside our own infrastructure never doubles an effect or an audit row.
 ### 6.1 `order.status` — order lifecycle callback
 
 Tell WeAreDA an order changed state on your side. Reference the order by the
-`external_order_id` we stored on delivery (preferred) or by `order_number`.
+`external_order_id` we stored on delivery (preferred), by our own order `id`
+(the UUID from `GET .../orders`), or by `order_number`. See §6.3.1 for when to
+use which.
 
 ```json
 {
@@ -676,7 +678,7 @@ fetch and store.
     "currency": "USD",
     "total": 105.00,
     "issued_at": "2026-07-20T10:00:00Z",
-    "external_order_id": "SO-88771",          // or order_number, to link the order
+    "external_order_id": "SO-88771",          // or our order id / order_number — see 6.3.1
     "document_url": "https://files.your-erp.com/inv/INV-2026-000123.pdf"
   }
 }
@@ -693,6 +695,31 @@ fetch and store.
 - Recording an invoice **does not move the order's status** and **does not touch
   stock** — it only attaches the invoice (and, if given, its stored PDF) to the order.
 
+#### 6.3.1 Linking an invoice (or an `order.status`) to the right order
+
+An inbound event names its order with **one** of three refs, tried in this order:
+
+| # | Field | Matched against | Available when |
+|---|-------|-----------------|----------------|
+| 1 | `external_order_id` | `external_order_id` we stored on delivery, scoped to you + the tenant | **push mode only** — we set it from your `POST /orders` response body (§4.3) |
+| 2 | `external_order_id` carrying **our** order UUID | our own order `id` | **always** — including pull mode |
+| 3 | `order_number` | our `order_number` | always (we send it in `POST /orders`; it is also in the orders list and detail) |
+
+**If you PULL orders instead of receiving them** (§11, `GET .../orders`), ref 1 does
+not exist for you: nothing stamps `external_order_id` when we never POST the order to
+you, and an `order.status` event does not stamp it either. Send **ref 2** — the `id`
+straight from the orders list — or `order_number`. Both are in the list payload, so
+no detail round-trip is needed.
+
+> [!WARNING]
+> An invoice whose ref matches **no** order is still ingested, with its
+> `order_id` left empty — it appears in the customer's invoice list but **not** on
+> the order. This is deliberate (an invoice may legitimately precede its order), so a
+> wrong ref fails **silently**. `order.status`, in contrast, is rejected outright with
+> `order_not_found`. Re-sending the invoice with the same `external_invoice_id` and a
+> correct ref links it in place (idempotent upsert) — there is no automatic backfill.
+
+To find orders still awaiting an invoice, poll `GET .../orders?hasInvoice=false`.
 
 ### 6.4 Orders and stock are independent flows
 
@@ -1052,6 +1079,7 @@ List response:
       "id": "order-uuid",
       "tenantId": "tenant-uuid",
       "externalOrderId": "external-order-123",
+      "orderNumber": "ORD-ABC",
       "status": "confirmed",
       "paymentStatus": "paid",
       "integrationStatus": "completed",
