@@ -29,7 +29,9 @@ A useful way to keep them straight:
 
 ## 1. WeAreDA -> Reseller (inbound)
 
-WeAreDA attaches whatever you registered at connect time, according to
+WeAreDA attaches whatever you registered on the integration (or, at
+`credentialScope: "tenant"`, whatever you sent when attaching that customer),
+according to
 `authType`:
 
 | `authType` | Header WeAreDA sends |
@@ -126,15 +128,23 @@ Contract §2 (configuring the integration) and §11 (reading tenant orders). A
 different plane from §4–§6 entirely.
 
 ```http
-GET  /api/v1/resellers/me/tenants/{tenantId}/orders
-POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
+GET   /api/v1/resellers/me/tenants/{tenantId}/orders
+POST  /api/v1/resellers/me/integrations                             (§2.1)
+POST  /api/v1/resellers/me/tenants/{tenantId}/integration/attach    (§2.2)
 X-Reseller-Key: rsk_...
 ```
 
-This is the plane that carries `integrationMode` and `orderStatusWrite` — the
-connect body, its `status` echo and `test-connection` all authenticate with this
-key. Registering an integration is a management action, not a connector one, so
-it never touches the HMAC or the inbound credential.
+This is the plane that carries `integrationMode` and `orderStatusWrite` — both
+configuration scopes, their `status` echo, `test-connection`, the `PATCH` of
+§7.1 and the two rotation `PUT`s all authenticate with this key. Registering an
+integration is a management action, not a connector one, so it never touches the
+HMAC or the inbound credential.
+
+Note that rotating the connector credential
+(`PUT /integrations/{provider}/credentials`) and rotating the signing secret
+(`PUT /integrations/{provider}/webhook-secret`) are themselves calls on **this**
+plane: you authenticate with `X-Reseller-Key` to change the other two
+credentials, and never by re-sending them inside some other body.
 
 - Authenticated by `X-Reseller-Key` — **not** the HMAC signature, and **not**
   your inbound connector credential.
@@ -158,7 +168,7 @@ Error model:
 | 400 | `invalid_filter` / `invalid_cursor` | bad filter value / tampered cursor |
 
 Client: `src/weareda/reseller-api-client.ts`. CLI: `npm run cli -- orders:list`,
-`npm run cli -- integration:connect`.
+`npm run cli -- integration:create`, `npm run cli -- integration:attach`.
 
 ---
 

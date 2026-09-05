@@ -7,11 +7,11 @@
   },
   "item": [
     {
-      "name": "00 - Integration Configuration",
-      "description": "Direction: Reseller -> WeAreDA management API (X-Reseller-Key), contract 1.1, 2 and 6.1.\n\nintegrationMode and orderStatusWrite are TOP-LEVEL fields of the connect body,\nsiblings of orderDeliveryStatus. Inside declaredCapabilities they are\n400 invalid_request; inside syncConfig, 400 invalid_sync_config.\n\n    integrationMode    reads  order delivery  catalog\n    query_and_send     yes    yes             pull      (default)\n    receive_and_send   NO     yes             push\n    query_only         yes    NO              pull\n    receive_only       NO     NO              push\n\nInbound webhooks (folders 05-08) work in EVERY mode. The mode governs only\nwhat WeAreDA does.\n\nPoint wearedaApiBaseUrl at `npm run mock:weareda` (http://localhost:4000) to\nrun this folder without a real WeAreDA connection.",
+      "name": "00 - Integration Configuration (two scopes)",
+      "description": "Direction: Reseller -> WeAreDA management API (X-Reseller-Key), contract 1.1,\n2, 6.1 and 7.1.\n\nConfiguration has TWO SCOPES, and two calls:\n\n    INTEGRATION   POST /api/v1/resellers/me/integrations\n                  once per (reseller, provider) - baseUrl, authType,\n                  credentialScope, the credential, the webhook secret,\n                  integrationMode, declaredCapabilities, syncConfig.\n                  Changing it affects EVERY customer you serve.\n\n    TENANT        POST .../tenants/{tenantId}/integration/attach\n                  once per customer - orderDeliveryStatus, orderStatusWrite,\n                  externalTenantId, and the credential at\n                  credentialScope 'tenant'. Affects that one customer.\n\nA field of the other scope is a 400 that NAMES where it belongs, in both\ndirections. POST .../integration/connect, which took both scopes in one body,\nis gone: it answers 410 endpoint_removed.\n\n    integrationMode    reads  order delivery  catalog\n    query_and_send     yes    yes             pull      (default)\n    receive_and_send   NO     yes             push\n    query_only         yes    NO              pull\n    receive_only       NO     NO              push\n\nInbound webhooks (folders 05-08) work in EVERY mode. The mode governs only\nwhat WeAreDA does.\n\nRun order: one create, then an attach (which captures wearedaWebhookUrl for\nfolders 05-08). A second create is 409 by design - restart the mock to try a\ndifferent mode.\n\nPoint wearedaApiBaseUrl at `npm run mock:weareda` (http://localhost:4000) to\nrun this folder without a real WeAreDA connection.",
       "item": [
         {
-          "name": "connect - query_and_send (default)",
+          "name": "2.1 create integration - query_and_send (default)",
           "request": {
             "method": "POST",
             "header": [
@@ -28,17 +28,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -47,13 +38,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "The default shape: WeAreDA reads your catalog on a schedule AND delivers orders to you.\n\nYou implement all four calls: GET /, GET /products, POST /orders, POST /orders/{id}/cancel.\n\nThe response echoes integrationMode, orderDeliveryEnabled and productsSyncMode, and captures webhookUrl into the collection variable used by folders 05-08.\n\nsyncConfig.orders.requiresTaxId (contract 4.3.2, 7) - a boolean, default\nfalse, which is the behaviour every existing integration keeps.\n\ntrue means WeAreDA NEVER delivers an order whose customer has no fiscal\nidentifier: the order is simply not yet eligible, and it is delivered\nautomatically - within a minute - once the tenant completes the contact.\nNothing is parked and nothing has to be re-queued.\n\nThat is the setting for a reseller that cannot invoice without a tax id.\nRejecting such orders on arrival is the wrong answer: a non-auth 4xx is not\nretried, so it turns a waiting order into a manual-review ticket.\n\nUnlike integrationMode and orderStatusWrite, this one IS a syncConfig option -\nit configures a delivery rule, not the shape of the integration. A non-boolean\nvalue is 400 invalid_sync_config."
+            "description": "INTEGRATION SCOPE, run ONCE. One integration per (reseller, provider),\nshared by every customer you serve.\n\nThe default shape: WeAreDA reads your catalog on a schedule AND delivers\norders to you. You implement all four calls: GET /, GET /products,\nPOST /orders, POST /orders/{id}/cancel.\n\nNothing per-tenant belongs in this body - orderDeliveryStatus,\norderStatusWrite and externalTenantId are 400s here, naming the attach\ncall they belong to.\n\nsyncConfig.orders.requiresTaxId (contract 4.3.2, 7) - a boolean, default\nfalse, which is the behaviour every existing integration keeps.\n\ntrue means WeAreDA NEVER delivers an order whose customer has no fiscal\nidentifier: the order is simply not yet eligible, and it is delivered\nautomatically - within a minute - once the tenant completes the contact.\nNothing is parked and nothing has to be re-queued.\n\nThat is the setting for a reseller that cannot invoice without a tax id.\nRejecting such orders on arrival is the wrong answer: a non-auth 4xx is not\nretried, so it turns a waiting order into a manual-review ticket.\n\nUnlike integrationMode (integration scope) and orderStatusWrite (tenant\nscope), this one is a syncConfig option - it configures a delivery rule, not\nthe shape of the integration. A non-boolean value is 400 invalid_sync_config.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -62,23 +59,23 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('201 created', function () { pm.response.to.have.status(201); });",
                   "pm.test('echoes the resolved mode', function () {",
                   "    const b = pm.response.json();",
                   "    pm.expect(b.integrationMode).to.eql('query_and_send');",
                   "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
                   "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
                   "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
-                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
-                  "}"
+                  "pm.test('carries nothing per-tenant - that is the attach body', function () {",
+                  "    pm.expect(pm.response.json()).to.not.have.property('orderStatusWrite');",
+                  "});"
                 ]
               }
             }
           ]
         },
         {
-          "name": "connect - receive_and_send (no read endpoint, orders still arrive)",
+          "name": "2.1 create integration - receive_and_send (no read endpoint, orders still arrive)",
           "request": {
             "method": "POST",
             "header": [
@@ -95,17 +92,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"receive_and_send\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -114,13 +102,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "Reads OFF, order delivery ON.\n\nWeAreDA never calls GET / or GET /products; your catalog arrives as product.updated webhooks (folder 06). Orders are still DELIVERED - delivering an order is a send, not a query.\n\nNo sync schedule is created, and any schedule left by a previous connect is deleted."
+            "description": "No reads: your catalog arrives as product.updated webhooks (folder 06).\nOrders are STILL delivered - delivering an order is a send, not a query.\n\nDelete the integration on the mock (restart it) before running a second\ncreate: a second one for the same provider is 409 integration_exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"receive_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -129,23 +123,23 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('201 created', function () { pm.response.to.have.status(201); });",
                   "pm.test('echoes the resolved mode', function () {",
                   "    const b = pm.response.json();",
                   "    pm.expect(b.integrationMode).to.eql('receive_and_send');",
                   "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
                   "    pm.expect(b.productsSyncMode).to.eql('push');   // DERIVED, never an input",
                   "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
-                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
-                  "}"
+                  "pm.test('carries nothing per-tenant - that is the attach body', function () {",
+                  "    pm.expect(pm.response.json()).to.not.have.property('orderStatusWrite');",
+                  "});"
                 ]
               }
             }
           ]
         },
         {
-          "name": "connect - query_only (read from, never sent an order)",
+          "name": "2.1 create integration - query_only (read from, never sent an order)",
           "request": {
             "method": "POST",
             "header": [
@@ -162,17 +156,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_only\",\n  \"orderStatusWrite\": false\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -181,13 +166,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "Reads ON, order delivery OFF.\n\nordersWrite is switched off in the effective capabilities, so orders never enter the delivery queue at all. Nothing is queued and later refused.\n\nNote the explicit \"orderStatusWrite\": false. Omitting a field on a reconnect leaves the STORED value unchanged - so if this tenant already had the opt-in on, moving it to a mode that delivers no orders must turn the flag off in the same call, or the connect is refused with 400 invalid_request."
+            "description": "WeAreDA pulls your catalog and never sends you an order. ordersWrite is\nswitched off in effectiveCapabilities, so an order never enters the\ndelivery queue at all - nothing is queued and later refused.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_only\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -196,18 +187,15 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
+                  "pm.test('201 created', function () { pm.response.to.have.status(201); });",
                   "pm.test('echoes the resolved mode', function () {",
                   "    const b = pm.response.json();",
                   "    pm.expect(b.integrationMode).to.eql('query_only');",
                   "    pm.expect(b.orderDeliveryEnabled).to.eql(false);",
                   "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
                   "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
-                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
-                  "}",
-                  "pm.test('ordersWrite is off in the effective capabilities', function () {",
-                  "    pm.expect(pm.response.json().effectiveCapabilities.ordersWrite).to.eql(false);",
+                  "pm.test('carries nothing per-tenant - that is the attach body', function () {",
+                  "    pm.expect(pm.response.json()).to.not.have.property('orderStatusWrite');",
                   "});"
                 ]
               }
@@ -215,7 +203,7 @@
           ]
         },
         {
-          "name": "connect - receive_only (publish only, baseUrl still required)",
+          "name": "2.1 create integration - receive_only (publish only, baseUrl still required)",
           "request": {
             "method": "POST",
             "header": [
@@ -232,17 +220,131 @@
                 "value": "application/json"
               }
             ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations"
+              ]
+            },
+            "description": "Publish-only: nothing is ever called on your side. You still register a\nbaseUrl - it is registered, not called. Omitting it is 400.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"receive_only\",\n  \"orderStatusWrite\": false\n}",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"receive_only\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
-            },
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 created', function () { pm.response.to.have.status(201); });",
+                  "pm.test('echoes the resolved mode', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.integrationMode).to.eql('receive_only');",
+                  "    pm.expect(b.orderDeliveryEnabled).to.eql(false);",
+                  "    pm.expect(b.productsSyncMode).to.eql('push');   // DERIVED, never an input",
+                  "});",
+                  "pm.test('carries nothing per-tenant - that is the attach body', function () {",
+                  "    pm.expect(pm.response.json()).to.not.have.property('orderStatusWrite');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "409 integration_exists - a create is not an upsert",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations"
+              ]
+            },
+            "description": "Run this after any successful create. POST /integrations creates; it never\nupserts, precisely so it can never overwrite what your other customers are\nrunning on. Change an existing integration with PATCH.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409', function () { pm.response.to.have.status(409); });",
+                  "pm.test('error names the conflict', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('integration_exists');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.2 attach customer (returns THIS customer's webhookUrl)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/attach",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -254,10 +356,19 @@
                 "tenants",
                 "{{tenantId}}",
                 "integration",
-                "connect"
+                "attach"
               ]
             },
-            "description": "Nothing is ever called on your side. You only publish webhooks.\n\nA baseUrl is STILL required at connect time - it is registered, not called. Omitting it is 400 invalid_request.\n\nNote the explicit \"orderStatusWrite\": false. Omitting a field on a reconnect leaves the STORED value unchanged - so if this tenant already had the opt-in on, moving it to a mode that delivers no orders must turn the flag off in the same call, or the connect is refused with 400 invalid_request."
+            "description": "TENANT SCOPE, run once per customer. Only per-tenant settings live here,\nand the response carries this customer's inbound webhook URL - captured\ninto the collection variable used by folders 05-08.\n\nAttaching is idempotent per customer: an omitted field keeps its stored\nvalue, so re-attaching never silently flips a setting you did not send.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"orderStatusWrite\": false,\n  \"externalTenantId\": \"cust-7\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -266,14 +377,11 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
-                  "pm.test('echoes the resolved mode', function () {",
-                  "    const b = pm.response.json();",
-                  "    pm.expect(b.integrationMode).to.eql('receive_only');",
-                  "    pm.expect(b.orderDeliveryEnabled).to.eql(false);",
-                  "    pm.expect(b.productsSyncMode).to.eql('push');   // DERIVED, never an input",
+                  "pm.test('2xx connected', function () { pm.expect([200, 201]).to.include(pm.response.code); });",
+                  "pm.test('carries this customer\\'s webhookUrl', function () {",
+                  "    pm.expect(pm.response.json()).to.have.property('webhookUrl');",
                   "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
+                  "if (pm.response.json().webhookUrl) {",
                   "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
                   "}"
                 ]
@@ -282,7 +390,7 @@
           ]
         },
         {
-          "name": "connect - with orderStatusWrite: true",
+          "name": "2.2 attach customer - with orderStatusWrite: true",
           "request": {
             "method": "POST",
             "header": [
@@ -299,17 +407,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"orderStatusWrite\": true\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/attach",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -321,10 +420,19 @@
                 "tenants",
                 "{{tenantId}}",
                 "integration",
-                "connect"
+                "attach"
               ]
             },
-            "description": "Opt in to letting an inbound order.status move the CUSTOMER-FACING orders.status, not just integration_status (contract 6.1).\n\nStrict boolean. Per TENANT, unlike integrationMode which is per reseller.\n\nWith this on, a status move fires the same alerts and conversation-lifecycle automation a manual change in the CRM fires, and shipped_at / delivered_at are filled in when blank."
+            "description": "The opt-in of contract 6.1: your order.status events then move the\nCUSTOMER-FACING order status as well, along a ladder that only ever\nadvances (folder 05).\n\nIt is stored PER TENANT while integrationMode is stored per reseller, on\npurpose: a mode change must never start rewriting a column the tenant's\nstaff edit, for every customer at once. It requires a mode that delivers\norders - with query_only or receive_only it is a 400.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"orderStatusWrite\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -333,18 +441,100 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
-                  "pm.test('echoes the resolved mode', function () {",
-                  "    const b = pm.response.json();",
-                  "    pm.expect(b.integrationMode).to.eql('query_and_send');",
-                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
-                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
-                  "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
-                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
-                  "}",
-                  "pm.test('orderStatusWrite is on', function () {",
+                  "pm.test('2xx connected', function () { pm.expect([200, 201]).to.include(pm.response.code); });",
+                  "pm.test('the opt-in took effect', function () {",
                   "    pm.expect(pm.response.json().orderStatusWrite).to.eql(true);",
+                  "});",
+                  "if (pm.response.json().webhookUrl) {",
+                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 GET integrations (each with its connectedTenants)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations"
+              ]
+            },
+            "description": "Your integrations, and the customers attached to each one."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 GET one integration (read syncConfig BEFORE patching it)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations/generic_http",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations",
+                "generic_http"
+              ]
+            },
+            "description": "Read the stored syncConfig from here before you PATCH it: contract 7.1\nREPLACES a named section whole rather than deep-merging it, so send the\ncurrent section back with your change applied."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('echoes the stored syncConfig', function () {",
+                  "    pm.expect(pm.response.json()).to.have.property('syncConfig');",
                   "});"
                 ]
               }
@@ -352,7 +542,180 @@
           ]
         },
         {
-          "name": "GET integration status",
+          "name": "7.1 PATCH integration - allow-list a document host",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations/generic_http",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations",
+                "generic_http"
+              ]
+            },
+            "description": "Partial edit at INTEGRATION scope - it affects every tenant of yours, and\nthe response says how many (affectedTenants, schedulesReconciled).\n\nMerge rules (7.1): only the top-level keys you name are touched, a named\nsection is REPLACED whole, and null deletes a key. The merged result is\nvalidated by the same rules a create would apply.\n\ndocumentHosts takes BARE hostnames only - never a URL, port, path or IP\nliteral. This is also the fix for an invoice rejected as ssrf_blocked:\nwiden the list, then retry that operation.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"syncConfig\": {\n    \"documentHosts\": [\n      \"files.your-erp.com\",\n      \"cdn.your-erp.com\"\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });",
+                  "pm.test('reports the blast radius', function () {",
+                  "    pm.expect(pm.response.json()).to.have.property('affectedTenants');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 PUT credentials (rotation is never a side effect of an edit)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations/generic_http/credentials",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations",
+                "generic_http",
+                "credentials"
+              ]
+            },
+            "description": "The ONLY call that changes the connector credential. Under the removed\nconnect, a body that happened to carry credentials rotated the one every\ncustomer of yours was authenticating with.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 PUT webhook-secret (one signing secret per reseller)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations/generic_http/webhook-secret",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations",
+                "generic_http",
+                "webhook-secret"
+              ]
+            },
+            "description": "Rotating the signing secret applies to EVERY webhook you send us\n(contract 9). Sign the next event with the new value.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"webhookSecret\": \"{{webhookSecret}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET integration status (this customer)",
           "request": {
             "method": "GET",
             "header": [
@@ -381,7 +744,7 @@
                 "status"
               ]
             },
-            "description": "Echoes integrationMode, orderDeliveryEnabled, productsSyncMode and orderStatusWrite, plus the validated syncConfig that was stored.\n\nsyncSchedule is null in a mode that does not read."
+            "description": "Echoes integrationMode, orderDeliveryEnabled and productsSyncMode for the\ncustomer in the path."
           },
           "response": [],
           "event": [
@@ -420,15 +783,6 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
               "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/test-connection",
               "host": [
@@ -445,7 +799,16 @@
                 "test-connection"
               ]
             },
-            "description": "Asks WeAreDA to call GET / on your baseUrl.\n\nTHE CONNECTION TEST IS A READ. Run this after connecting in receive_and_send or receive_only and it answers 422 { reason: 'read_calls_disabled' } without calling anything - there is nothing for it to test.\n\nAfter a query_* connect it actually calls you: watch the GET / arrive in your sandbox log."
+            "description": "Asks WeAreDA to call GET / on your baseUrl.\n\nThe connection test IS a read, so under receive_and_send or receive_only\nit answers 422 { reason: 'read_calls_disabled' } without calling anything.\nThat is not a misconfiguration: if you want the test, you want a query_*\nmode.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -454,7 +817,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 after a query_* connect, 422 after a receive_* one', function () {",
+                  "pm.test('200 under a query_* mode, 422 under a receive_* one', function () {",
                   "    pm.expect([200, 422, 502]).to.include(pm.response.code);",
                   "});",
                   "if (pm.response.code === 422) {",
@@ -462,6 +825,191 @@
                   "        pm.expect(pm.response.json().reason).to.eql('read_calls_disabled');",
                   "    });",
                   "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "410 endpoint_removed - the retired connect",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "connect"
+              ]
+            },
+            "description": "The one breaking change of this contract (2.3, 9).\n\nconnect took BOTH scopes in one body against a tenant-scoped URL and\nupserted the shared half, so connecting one customer rewrote the baseUrl,\nauth type, credential scope, capabilities and syncConfig of all the\nothers - and rotated the shared credential as a side effect.\n\nIt was retired as a new PAIR of paths, never as a redefinition of the same\none: this answers 410 and names both replacements.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('410', function () { pm.response.to.have.status(410); });",
+                  "pm.test('names its replacements', function () {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.error).to.eql('endpoint_removed');",
+                  "    pm.expect(b.replacements.join(' ')).to.include('/integrations');",
+                  "    pm.expect(b.replacements.join(' ')).to.include('/attach');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 - a TENANT field in the integration body",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations"
+              ]
+            },
+            "description": "orderStatusWrite is stored per tenant, so it belongs to the attach body.\nThe error names the call it belongs to rather than dropping it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  },\n  \"orderStatusWrite\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_request', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "400 - an INTEGRATION field in the attach body",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/attach",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "tenants",
+                "{{tenantId}}",
+                "integration",
+                "attach"
+              ]
+            },
+            "description": "This is the mistake the old connect made invisible: a baseUrl sent while\nattaching ONE customer used to be applied to ALL of them. Now it is a 400\nnaming POST /api/v1/resellers/me/integrations.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"https://somewhere-else.example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_request', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
+                  "});",
+                  "console.log('Message:', pm.response.json().message);"
                 ]
               }
             }
@@ -485,17 +1033,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_only\",\n  \"orderStatusWrite\": true\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/attach",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -507,10 +1046,19 @@
                 "tenants",
                 "{{tenantId}}",
                 "integration",
-                "connect"
+                "attach"
               ]
             },
-            "description": "The one combination that is refused:\n\n  orderStatusWrite requires an integrationMode that delivers orders -\n  'query_only' never sends this reseller an order to report a status on\n\nThe two settings are otherwise independent: integrationMode is per reseller and describes topology; orderStatusWrite is per tenant and is a question of data authority."
+            "description": "Run this after creating the integration in query_only or receive_only.\nThose resellers never receive an order, so they have none to report a\nstatus on and the flag could never fire.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"orderStatusWrite\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -547,17 +1095,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"orderStatusWrite\": \"true\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/attach",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -569,10 +1108,19 @@
                 "tenants",
                 "{{tenantId}}",
                 "integration",
-                "connect"
+                "attach"
               ]
             },
-            "description": "orderStatusWrite must be a REAL boolean. The string \"true\" is a 400, not a truthy value."
+            "description": "A STRICT boolean. The string \"true\" is a 400, not a truthy value.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"orderStatusWrite\": \"true\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -584,8 +1132,7 @@
                   "pm.test('400', function () { pm.response.to.have.status(400); });",
                   "pm.test('error is invalid_request', function () {",
                   "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
-                  "});",
-                  "console.log('Message:', pm.response.json().message);"
+                  "});"
                 ]
               }
             }
@@ -609,17 +1156,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"declaredCapabilities\": {\n    \"integrationMode\": \"query_only\"\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -628,13 +1166,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "WRONG PLACE. integrationMode is a TOP-LEVEL field, a sibling of orderDeliveryStatus.\n\ndeclaredCapabilities accepts only six boolean keys - productsRead, productsWrite, stockRead, stockWebhooks, ordersWrite, invoices - and it is METADATA ONLY. Effective capabilities are connector support n platform ceiling n mode; your declaration is not an input and enables nothing."
+            "description": "declaredCapabilities takes exactly six boolean keys and enables nothing.\nintegrationMode is a top-level field of this body.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  },\n  \"declaredCapabilities\": {\n    \"integrationMode\": \"query_only\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -646,8 +1190,7 @@
                   "pm.test('400', function () { pm.response.to.have.status(400); });",
                   "pm.test('error is invalid_request', function () {",
                   "    pm.expect(pm.response.json().error).to.eql('invalid_request');",
-                  "});",
-                  "console.log('Message:', pm.response.json().message);"
+                  "});"
                 ]
               }
             }
@@ -671,17 +1214,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"syncConfig\": {\n    \"orderStatusWrite\": true\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -690,13 +1224,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "WRONG PLACE, and a different error code than the declaredCapabilities mistake.\n\nUnknown keys INSIDE syncConfig are rejected loudly (contract 7). Unknown keys at the TOP LEVEL of the body are dropped in silence - see the next request."
+            "description": "syncConfig is a strict whitelist (contract 7), so a misplaced field there\nfails loudly - unlike an unknown key at the top level, which is dropped in\nsilence. orderStatusWrite belongs to the attach body.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orderStatusWrite\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -708,8 +1248,7 @@
                   "pm.test('400', function () { pm.response.to.have.status(400); });",
                   "pm.test('error is invalid_sync_config', function () {",
                   "    pm.expect(pm.response.json().error).to.eql('invalid_sync_config');",
-                  "});",
-                  "console.log('Message:', pm.response.json().message);"
+                  "});"
                 ]
               }
             }
@@ -733,17 +1272,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"products\": {\n      \"mode\": \"push\"\n    }\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -752,13 +1282,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "The mode DERIVES the catalog transport: pull for query_*, push for receive_*.\n\nSetting a contradictory products.mode is a 400, not a precedence rule. To push, choose receive_and_send or receive_only - do not fight the derivation."
+            "description": "The mode DERIVES the catalog transport. A contradiction is a 400, not a\nprecedence puzzle: remove products.mode, or change integrationMode.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"products\": {\n      \"mode\": \"push\"\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -770,15 +1306,14 @@
                   "pm.test('400', function () { pm.response.to.have.status(400); });",
                   "pm.test('error is invalid_sync_config', function () {",
                   "    pm.expect(pm.response.json().error).to.eql('invalid_sync_config');",
-                  "});",
-                  "console.log('Message:', pm.response.json().message);"
+                  "});"
                 ]
               }
             }
           ]
         },
         {
-          "name": "200 but silently ignored - productsSyncMode at the top level",
+          "name": "400 invalid_sync_config - documentHosts carrying a URL",
           "request": {
             "method": "POST",
             "header": [
@@ -795,17 +1330,8 @@
                 "value": "application/json"
               }
             ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"orderDeliveryStatus\": \"confirmed\",\n  \"integrationMode\": \"query_and_send\",\n  \"productsSyncMode\": \"push\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
             "url": {
-              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/tenants/{{tenantId}}/integration/connect",
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
               "host": [
                 "{{wearedaApiBaseUrl}}"
               ],
@@ -814,13 +1340,19 @@
                 "v1",
                 "resellers",
                 "me",
-                "tenants",
-                "{{tenantId}}",
-                "integration",
-                "connect"
+                "integrations"
               ]
             },
-            "description": "THE SILENT ONE. productsSyncMode is a RESPONSE field, never an input.\n\nSent at the top level of the connect body it is dropped without a word: 200, no error, and productsSyncMode in the response is still 'pull'. This is the failure that looks exactly like a feature that does not work.\n\nUnknown keys inside syncConfig are the opposite - rejected loudly."
+            "description": "documentHosts takes up to 10 BARE hostnames - never a URL, a port, a path,\nor an IP literal. Allow-listing an IP would route around the SSRF guard\nthe list exists to keep (contract 7, 9).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"documentHosts\": [\n      \"https://files.your-erp.com/inv\"\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": [],
           "event": [
@@ -829,19 +1361,70 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200 connected', function () { pm.response.to.have.status(200); });",
-                  "pm.test('echoes the resolved mode', function () {",
-                  "    const b = pm.response.json();",
-                  "    pm.expect(b.integrationMode).to.eql('query_and_send');",
-                  "    pm.expect(b.orderDeliveryEnabled).to.eql(true);",
-                  "    pm.expect(b.productsSyncMode).to.eql('pull');   // DERIVED, never an input",
-                  "});",
-                  "if (pm.response.code === 200 && pm.response.json().webhookUrl) {",
-                  "    pm.collectionVariables.set('wearedaWebhookUrl', pm.response.json().webhookUrl);",
-                  "}",
-                  "pm.test('the input was dropped without a word', function () {",
-                  "    pm.expect(pm.response.json().productsSyncMode).to.eql('pull');",
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('error is invalid_sync_config', function () {",
+                  "    pm.expect(pm.response.json().error).to.eql('invalid_sync_config');",
                   "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "201 but silently ignored - productsSyncMode at the top level",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Reseller-Key",
+                "value": "{{resellerKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{wearedaApiBaseUrl}}/api/v1/resellers/me/integrations",
+              "host": [
+                "{{wearedaApiBaseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "resellers",
+                "me",
+                "integrations"
+              ]
+            },
+            "description": "The one that is NOT an error. productsSyncMode is a RESPONSE field: sent as\ninput it is dropped without a word, and the catalog transport stays 'pull'.\nThat silence is why this reference validates bodies locally before sending.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"generic_http\",\n  \"baseUrl\": \"{{resellerBaseUrl}}\",\n  \"authType\": \"api_key\",\n  \"credentialScope\": \"reseller\",\n  \"externalCredentials\": {\n    \"apiKey\": \"{{resellerApiKey}}\"\n  },\n  \"webhookSecret\": \"{{webhookSecret}}\",\n  \"integrationMode\": \"query_and_send\",\n  \"syncConfig\": {\n    \"orders\": {\n      \"requiresTaxId\": false\n    }\n  },\n  \"productsSyncMode\": \"push\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('accepted', function () { pm.expect([201, 409]).to.include(pm.response.code); });",
+                  "if (pm.response.code === 201) {",
+                  "    pm.test('the top-level productsSyncMode changed nothing', function () {",
+                  "        pm.expect(pm.response.json().productsSyncMode).to.eql('pull');",
+                  "    });",
+                  "}"
                 ]
               }
             }

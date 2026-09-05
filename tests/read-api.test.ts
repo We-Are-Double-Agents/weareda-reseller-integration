@@ -50,20 +50,85 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
       }
     });
 
-    // Contract 2 - the integration configuration endpoints, on the same
-    // X-Reseller-Key plane as the read API.
-    backend.post('/api/v1/resellers/me/tenants/:tenantId/integration/connect', async (request) => {
+    // Contract 2 - the configuration endpoints, in their TWO SCOPES, on the
+    // same X-Reseller-Key plane as the read API.
+    backend.post('/api/v1/resellers/me/integrations', async (request, reply) => {
       const body = request.body as Record<string, unknown>;
       calls[calls.length - 1]!.body = body;
       const mode = (body.integrationMode as string) ?? 'query_and_send';
-      return {
-        status: 'connected',
+      return reply.code(201).send({
+        provider: body.provider,
+        baseUrl: body.baseUrl,
+        credentialScope: body.credentialScope ?? 'reseller',
         integrationMode: mode,
         orderDeliveryEnabled: mode === 'query_and_send' || mode === 'receive_and_send',
         productsSyncMode: mode.startsWith('query') ? 'pull' : 'push',
-        orderStatusWrite: body.orderStatusWrite === true,
+      });
+    });
+
+    backend.get('/api/v1/resellers/me/integrations', async () => ({
+      integrations: [{ provider: 'generic_http', connectedTenants: [{ tenantId: 'tenant-uuid' }] }],
+    }));
+
+    backend.get('/api/v1/resellers/me/integrations/:provider', async (request) => ({
+      provider: (request.params as { provider: string }).provider,
+      integrationMode: 'receive_and_send',
+      syncConfig: { frequency: 'daily', orders: { requiresTaxId: true } },
+    }));
+
+    backend.patch('/api/v1/resellers/me/integrations/:provider', async (request) => {
+      calls[calls.length - 1]!.body = request.body;
+      return {
+        provider: (request.params as { provider: string }).provider,
+        integrationMode: 'receive_and_send',
+        // The blast radius comes back in the response, not only in the docs.
+        affectedTenants: 3,
+        schedulesReconciled: 3,
       };
     });
+
+    backend.put('/api/v1/resellers/me/integrations/:provider/credentials', async (request) => {
+      calls[calls.length - 1]!.body = request.body;
+      return { rotated: 'credentials' };
+    });
+
+    backend.put('/api/v1/resellers/me/integrations/:provider/webhook-secret', async (request) => {
+      calls[calls.length - 1]!.body = request.body;
+      return { rotated: 'webhookSecret' };
+    });
+
+    backend.post('/api/v1/resellers/me/tenants/:tenantId/integration/attach', async (request) => {
+      const body = request.body as Record<string, unknown>;
+      calls[calls.length - 1]!.body = body;
+      return {
+        status: 'connected',
+        provider: body.provider,
+        webhookUrl: 'https://api.weareda.test/api/v1/reseller-webhooks/conn_1',
+        integrationMode: 'receive_and_send',
+        orderDeliveryEnabled: true,
+        productsSyncMode: 'push',
+        orderStatusWrite: body.orderStatusWrite === true,
+        externalTenantId: body.externalTenantId ?? null,
+      };
+    });
+
+    backend.post('/api/v1/resellers/me/tenants/:tenantId/integration/disconnect', async () => ({
+      status: 'disconnected',
+    }));
+
+    // The one breaking change: the old path answers 410 and names its
+    // replacements (contract 2.3, 9).
+    backend.post(
+      '/api/v1/resellers/me/tenants/:tenantId/integration/connect',
+      async (_request, reply) =>
+        reply.code(410).send({
+          error: 'endpoint_removed',
+          replacements: [
+            'POST /api/v1/resellers/me/integrations',
+            'POST /api/v1/resellers/me/tenants/{tenantId}/integration/attach',
+          ],
+        }),
+    );
 
     backend.get('/api/v1/resellers/me/tenants/:tenantId/integration/status', async () => ({
       status: 'connected',
@@ -169,34 +234,113 @@ describe('reseller read API client (Reseller -> WeAreDA management API)', () => 
     );
   }
 
-  it('registers the integration with the two new fields at the TOP LEVEL', async () => {
-    const response = await client().connect({
+  it('creates the integration at INTEGRATION scope - no per-tenant field in the body', async () => {
+    const response = await client().createIntegration({
       provider: 'generic_http',
       baseUrl: 'https://api.your-erp.com/v1',
-      orderDeliveryStatus: 'confirmed',
+      authType: 'api_key',
+      credentialScope: 'reseller',
+      externalCredentials: { apiKey: 'sk_live_x' },
       integrationMode: 'receive_and_send',
-      orderStatusWrite: true,
     });
 
     expect(response.method).toBe('POST');
-    expect(calls[0]?.url).toContain('/tenants/TENANT_ID/integration/connect');
+    expect(response.statusCode).toBe(201);
+    // Reseller-wide, so NOT under /tenants/{tenantId}.
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/integrations');
+    expect(calls[0]?.url).not.toContain('/tenants/');
     // Same plane as the read API: X-Reseller-Key, never the webhook HMAC.
     expect(calls[0]?.resellerKey).toBe(RESELLER_KEY);
     expect(calls[0]?.signature).toBeUndefined();
 
     const sent = calls[0]?.body as Record<string, unknown>;
     expect(sent.integrationMode).toBe('receive_and_send');
-    expect(sent.orderStatusWrite).toBe(true);
-    // NOT nested anywhere.
-    expect(sent.declaredCapabilities).toBeUndefined();
-    expect(sent.syncConfig).toBeUndefined();
+    expect(sent.credentialScope).toBe('reseller');
+    // Per-tenant settings have no business here.
+    expect(sent.orderStatusWrite).toBeUndefined();
+    expect(sent.orderDeliveryStatus).toBeUndefined();
 
     expect(response.body).toMatchObject({
       integrationMode: 'receive_and_send',
       orderDeliveryEnabled: true,
       productsSyncMode: 'push',
-      orderStatusWrite: true,
     });
+  });
+
+  it("attaches one customer at TENANT scope, and gets that customer's webhookUrl", async () => {
+    const response = await client().attachTenant({
+      provider: 'generic_http',
+      orderDeliveryStatus: 'confirmed',
+      orderStatusWrite: true,
+      externalTenantId: 'cust-7',
+    });
+
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/tenants/TENANT_ID/integration/attach');
+    const sent = calls[0]?.body as Record<string, unknown>;
+    expect(sent.orderStatusWrite).toBe(true);
+    // Nothing reseller-wide travels in an attach body.
+    expect(sent.baseUrl).toBeUndefined();
+    expect(sent.integrationMode).toBeUndefined();
+    expect(sent.syncConfig).toBeUndefined();
+
+    expect(response.body).toMatchObject({
+      status: 'connected',
+      orderStatusWrite: true,
+      externalTenantId: 'cust-7',
+    });
+    expect(response.body.webhookUrl).toContain('/api/v1/reseller-webhooks/');
+  });
+
+  it('lists integrations with the customers attached to each', async () => {
+    const response = await client().listIntegrations();
+    expect(calls[0]?.method).toBe('GET');
+    expect(response.body).toMatchObject({
+      integrations: [{ provider: 'generic_http', connectedTenants: [{ tenantId: 'tenant-uuid' }] }],
+    });
+  });
+
+  it('reads the stored syncConfig back before patching it (7.1)', async () => {
+    const response = await client().getIntegration('generic_http');
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/integrations/generic_http');
+    expect(response.body.syncConfig).toMatchObject({ orders: { requiresTaxId: true } });
+  });
+
+  it('patches the integration and reports the blast radius', async () => {
+    const response = await client().patchIntegration('generic_http', {
+      syncConfig: { documentHosts: ['files.your-erp.com', 'cdn.your-erp.com'] },
+    });
+
+    expect(calls[0]?.method).toBe('PATCH');
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/integrations/generic_http');
+    // affectedTenants / schedulesReconciled are in the RESPONSE, not only in
+    // the documentation (contract 2.3).
+    expect(response.body).toMatchObject({ affectedTenants: 3, schedulesReconciled: 3 });
+  });
+
+  it('rotates the credential and the signing secret through their own PUTs', async () => {
+    const credentials = await client().rotateCredentials('generic_http', { apiKey: 'sk_live_new' });
+    expect(credentials.method).toBe('PUT');
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/integrations/generic_http/credentials');
+    expect(calls[0]?.body).toMatchObject({ externalCredentials: { apiKey: 'sk_live_new' } });
+
+    calls = [];
+    const secret = await client().rotateWebhookSecret('generic_http', 'whsec_new');
+    expect(secret.method).toBe('PUT');
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/integrations/generic_http/webhook-secret');
+    expect(calls[0]?.body).toMatchObject({ webhookSecret: 'whsec_new' });
+  });
+
+  it('detaches one customer without touching the integration', async () => {
+    const response = await client().disconnectTenant();
+    expect(calls[0]?.url).toBe('/api/v1/resellers/me/tenants/TENANT_ID/integration/disconnect');
+    expect(response.body).toMatchObject({ status: 'disconnected' });
+  });
+
+  it('refuses the removed connect locally, naming its two replacements', () => {
+    // The endpoint answers 410; the client does not even make the round trip.
+    expect(() => client().connect()).toThrow(/integration\/connect was removed/);
+    expect(() => client().connect()).toThrow(/POST \/api\/v1\/resellers\/me\/integrations/);
+    expect(calls).toHaveLength(0);
   });
 
   it('echoes the mode from GET .../integration/status', async () => {

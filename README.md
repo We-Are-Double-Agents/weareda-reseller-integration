@@ -187,43 +187,71 @@ gets back `202 { accepted: true, operationId }`.
    events carry a `document_url` WeAreDA can actually fetch. (Product images
    already point at `https://cdn.weareda.com/demo/products/`, so they need no
    tunnel.)
-3. Register the integration for your tenant (contract §2):
+3. Register the integration — **once**, for every customer you serve
+   (contract §2.1):
 
    ```jsonc
-   POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
+   POST /api/v1/resellers/me/integrations
    {
      "provider": "generic_http",
      "baseUrl": "https://example.trycloudflare.com",  // your tunnel URL
      "authType": "api_key",
+     "credentialScope": "reseller",       // one credential | "tenant" = one each
      "externalCredentials": { "apiKey": "demo_secret" },  // = RESELLER_API_KEY
      "webhookSecret": "whsec_example",
-     "orderDeliveryStatus": "confirmed",
-     "integrationMode": "query_and_send",  // §1.1 - which calls WeAreDA makes
-     "orderStatusWrite": false             // §6.1 - opt-in, strict boolean
+     "integrationMode": "query_and_send"  // §1.1 - which calls WeAreDA makes
    }
    ```
 
-   `integrationMode` and `orderStatusWrite` are **top-level** fields, siblings of
-   `orderDeliveryStatus`. Inside `declaredCapabilities` they are
-   `400 invalid_request`; inside `syncConfig`, `400 invalid_sync_config`.
+   A second create for the same provider is `409 integration_exists`: it is a
+   create, not an upsert, so it can never overwrite what your other customers are
+   running on. Change it later with `PATCH /integrations/{provider}`.
 
-   The sandbox can make this call for you, validating the body locally first:
+4. Attach each customer (contract §2.2). Only per-tenant settings live here:
+
+   ```jsonc
+   POST /api/v1/resellers/me/tenants/{tenantId}/integration/attach
+   {
+     "provider": "generic_http",
+     "orderDeliveryStatus": "confirmed",  // which status triggers delivery
+     "orderStatusWrite": false,           // §6.1 - opt-in, strict boolean
+     "externalTenantId": "cust-7"         // optional, your id for this customer
+   }
+   ```
+
+   The two bodies never mix: a `baseUrl` here, or an `orderStatusWrite` up
+   there, is a `400` naming the call it belongs to. That guard is the point —
+   attaching one customer must never reconfigure the others.
+
+   > `POST .../integration/connect` was removed and answers `410
+   > endpoint_removed`. It took both scopes in one body against a tenant-scoped
+   > URL, so connecting one customer rewrote every other customer's
+   > configuration and rotated the shared credential as a side effect.
+
+   The sandbox can make both calls for you, validating each body locally first:
 
    ```bash
-   npm run cli -- integration:connect --mode query_and_send --order-status-write
+   npm run cli -- integration:create --mode query_and_send
+   npm run cli -- integration:attach --order-status-write
    npm run cli -- integration:status
    ```
 
-4. The response returns your inbound webhook URL. Put it, and the secret you
-   just registered, into `.env`:
+5. The attach response returns that customer's inbound webhook URL. Put it, and
+   the secret you registered, into `.env`:
 
    ```env
    WEAREDA_WEBHOOK_URL=https://api.weareda.com/api/v1/reseller-webhooks/<connectionId>
    WEAREDA_WEBHOOK_SECRET=whsec_example
    ```
 
-5. WeAreDA calls `GET /` to verify the credentials. Watch your terminal — the
+6. WeAreDA calls `GET /` to verify the credentials. Watch your terminal — the
    request appears as a labelled `WeAreDA -> Reseller` block.
+
+Later changes each have their own call, and none of them is a re-`connect`:
+`PATCH /integrations/{provider}` for anything reseller-wide (§7.1),
+`PUT .../credentials` and `PUT .../webhook-secret` to rotate a secret,
+`PATCH .../tenants/{tenantId}/integration` for one customer, and
+`POST .../integration/disconnect` to detach one.
 
 Catalog **pull** is the default. If you would rather push, choose an
 `integrationMode` that does not read — `receive_and_send` or `receive_only` — and
@@ -282,8 +310,8 @@ A reseller with **no read endpoint at all** is a complete, working integration.
 npm run scenario:integration-modes   # all four, started and called for real
 ```
 
-Full reference, with a worked connect call and response per mode:
-[docs/integration-modes.md](docs/integration-modes.md).
+Full reference, with the two configuration scopes and a worked call and response
+per mode: [docs/integration-modes.md](docs/integration-modes.md).
 
 ---
 
@@ -302,9 +330,11 @@ An inbound `order.status` moves **two** columns, and the second one is opt-in
 | `rejected` / `failed` / `error` | `manual_review` | *(unchanged)* |
 | anything else | not mapped → `unknown_order_state` | *(unchanged)* |
 
-`orderStatusWrite: true` at connect time turns the third column on. It then moves
-both in one atomic write and fires the same alerts and lifecycle automation a
-manual status change in the CRM fires.
+`orderStatusWrite: true`, set **per customer** when you attach them, turns the
+third column on. It then moves both in one atomic write and fires the same alerts
+and lifecycle automation a manual status change in the CRM fires. It is stored
+per tenant on purpose: a reseller-wide mode change must never start rewriting a
+column the tenant's staff edit, for all of your customers at once.
 
 ```
 LADDER      draft → pending → confirmed → processing → shipped → delivered
@@ -429,7 +459,7 @@ WeAreDA then holds the order back and delivers it automatically, within a
 minute, once the tenant completes the contact:
 
 ```bash
-npm run cli -- integration:connect --requires-tax-id
+npm run cli -- integration:create --requires-tax-id
 ```
 
 Fiscal identifiers are sensitive (§11.8). The sandbox keeps the real value on
@@ -471,9 +501,16 @@ npm run cli -- <command> [args] [--dry-run] [--event-id evt_...]
 | `order-status <orderId> <state>` | `order.status` | `npm run cli -- order-status SO-10001 shipped` |
 | `product-update <ids...> \| --all` | `product.updated` | `npm run cli -- product-update --all` |
 | `invoice <orderId>` | `invoice.issued` | `npm run cli -- invoice SO-10001` — prints the fiscal identity it invoices against, masked |
-| `integration:connect [--mode M] [--order-status-write] [--requires-tax-id]` | — | connect API (contract §1.1/§2), plus `syncConfig.orders.requiresTaxId` (§4.3.2) |
+| `integration:create [--mode M] [--credential-scope S] [--requires-tax-id]` | — | the integration, once (§2.1), plus `syncConfig.orders.requiresTaxId` (§4.3.2) |
+| `integration:attach [--order-status-write] [--external-tenant-id ID]` | — | one customer (§2.2); the response carries their `webhookUrl` |
+| `integration:list` / `integration:get` | — | your integrations and the customers attached to each (§2.3) |
+| `integration:patch [--mode M] [--frequency F] [--document-hosts a,b] [--sync-config '{…}']` | — | partial edit at integration scope; `syncConfig` merges by §7.1 |
+| `integration:rotate-credentials` / `integration:rotate-secret` | — | rotation, which is never a side effect of an edit |
+| `integration:disconnect` | — | detaches this customer only |
 | `integration:status` | — | echoes mode, delivery, sync mode |
 | `integration:test` | — | `422 read_calls_disabled` in a `receive_*` mode |
+| `integration:retry <operationId>` | — | re-runs one operation, e.g. after allow-listing a document host (§7.1) |
+| `integration:connect` | — | removed (`410`); prints the two calls that replace it |
 | `orders:list` | — | read API (contract §11) |
 | `orders:get <orderId>` | — | read API |
 | `orders:invoices <orderId>` | — | read API |
@@ -486,7 +523,8 @@ npm run demo:stock          # stock.updated with two batched lines
 npm run demo:order-status   # order.status shipped
 npm run demo:products       # product.updated with the whole catalog
 npm run demo:invoice        # invoice.issued with the demo PDF
-npm run demo:connect        # connect, query_and_send + orderStatusWrite
+npm run demo:create         # create the integration, query_and_send
+npm run demo:attach         # attach this customer, with orderStatusWrite
 ```
 
 Every command prints the destination URL, method, event type, event id,
@@ -594,10 +632,13 @@ postman/WeAreDA Reseller Reference.postman_environment.json
 Import both, then fill in the environment. 57 requests in 11 folders covering
 every endpoint, every event type and every documented error.
 
-Folder 00 registers the integration: a connect call per `integrationMode`, the
-`orderStatusWrite` opt-in, `integration/status`, `test-connection` (watch it
-answer `422 read_calls_disabled` after a `receive_*` connect) and every
-connect-time `400` — including the one that is not an error at all, a top-level
+Folder 00 registers the integration in both scopes: a create per
+`integrationMode`, `409 integration_exists` on the second one, the attach with
+its `orderStatusWrite` opt-in, the `PATCH` and the two rotation `PUT`s,
+`integration/status`, `test-connection` (watch it answer `422
+read_calls_disabled` under a `receive_*` mode), the `410` on the removed
+`connect`, and every documented `400` — including the one that is not an error
+at all, a top-level
 `productsSyncMode` dropped in silence. Point `wearedaApiBaseUrl` at
 `npm run mock:weareda` to run it without a real connection.
 
@@ -630,8 +671,9 @@ npm run typecheck
 Covers authentication (all four mechanisms), pagination and `updated_since`,
 order creation and idempotency, cancellation and its fallback, HMAC signing
 against a known vector, one-event-type-per-request enforcement, batch caps,
-retry/dedup behaviour, the read and connect API's authentication plane, the four
-integration modes and every connect-time `400`, the `order.status` mapping,
+retry/dedup behaviour, the read and configuration API's authentication plane, the
+four integration modes, both configuration scopes and every documented `400` /
+`409`, the `order.status` mapping,
 ladder and conflict rules — and the mandatory stock-independence tests.
 
 [docs/testing.md](docs/testing.md) describes each file.
@@ -675,15 +717,15 @@ src/
   weareda/
     types.ts               wire types, state mapping (both columns), the
                            ladder + transition rules, batch caps
-    integration-mode.ts    the four modes, capabilities, connect-body validation
+    integration-mode.ts    the four modes, capabilities, both config scopes
     events.ts              builders - one event type by construction
     webhook-client.ts      sign-once-send-those-bytes delivery
-    reseller-api-client.ts X-Reseller-Key plane: connect (contract 2) + read API (11)
+    reseller-api-client.ts X-Reseller-Key plane: configuration (2) + read API (11)
   cli/                     the reseller -> WeAreDA commands
   scenarios/               guided end-to-end walkthroughs
 scripts/
   tunnel.mjs               cloudflared quick tunnel + banner
-  mock-weareda.mjs         stand-in WeAreDA: webhooks, the connect plane and
+  mock-weareda.mjs         stand-in WeAreDA: webhooks, both config scopes and
                            the order.status ladder
 data/products.json         catalog fixtures
 fixtures/invoices/         demo invoice PDF + metadata

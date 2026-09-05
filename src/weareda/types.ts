@@ -185,7 +185,7 @@ export type WeAreDAEventType =
  *   1. integration_status - always moved, on every integration.
  *   2. orders.status      - the CUSTOMER-FACING status, moved only when the
  *                           tenant opted in with `orderStatusWrite: true`
- *                           at connect time (see integration-mode.ts).
+ *                           when the customer was attached (integration-mode.ts).
  *
  * Anything outside the table is not mapped at all: the operation is rejected
  * with `unknown_order_state` and the order is left exactly as it was.

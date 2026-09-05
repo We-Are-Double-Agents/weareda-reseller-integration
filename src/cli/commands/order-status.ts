@@ -23,7 +23,7 @@
  *   anything else                           NOT MAPPED          (unchanged)
  *
  * The second column only moves when the tenant registered
- * `orderStatusWrite: true` at connect time. This command prints what WOULD
+ * `orderStatusWrite: true` when that customer was attached. This command prints what WOULD
  * happen for the setting in your .env (ORDER_STATUS_WRITE), including the
  * ladder rule that discards a lower rung arriving after a higher one.
  *
@@ -89,7 +89,7 @@ export async function orderStatusCommand(ctx: CliContext, args: ParsedArgs): Pro
     log.plain(`  last_error_code ${transition.errorCode}`);
   }
   if (!orderStatusWrite) {
-    log.plain('  Enable it at connect time: integration:connect --order-status-write');
+    log.plain('  Enable it per customer: integration:attach --order-status-write');
   }
 
   log.plain('');

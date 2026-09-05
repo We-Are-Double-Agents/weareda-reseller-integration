@@ -26,9 +26,25 @@
  *     401 { error: 'stale_timestamp' }       outside the +/-5 minute window
  *     404 { error: 'not_found' }             unknown connection
  *
- *   POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect     s.1.1/2
- *   GET  /api/v1/resellers/me/tenants/{tenantId}/integration/status       s.1.1/2
- *   POST /api/v1/resellers/me/tenants/{tenantId}/integration/test-connection s.1.1
+ *   The configuration plane, in its TWO SCOPES (section 2):
+ *
+ *   POST  /api/v1/resellers/me/integrations                              s.2.1
+ *     201 the integration      409 { error: 'integration_exists' }
+ *   GET   /api/v1/resellers/me/integrations                              s.2.3
+ *   GET   /api/v1/resellers/me/integrations/{provider}                   s.2.3
+ *   PATCH /api/v1/resellers/me/integrations/{provider}                   s.2.3/7.1
+ *     merges syncConfig by 7.1, echoes affectedTenants/schedulesReconciled,
+ *     409 { error: 'order_status_write_conflict' } when it would strand a tenant
+ *   PUT   /api/v1/resellers/me/integrations/{provider}/credentials       s.2.3
+ *   PUT   /api/v1/resellers/me/integrations/{provider}/webhook-secret    s.2.3
+ *
+ *   POST  /api/v1/resellers/me/tenants/{tenantId}/integration/attach     s.2.2
+ *   PATCH /api/v1/resellers/me/tenants/{tenantId}/integration            s.2.2
+ *   POST  /api/v1/resellers/me/tenants/{tenantId}/integration/disconnect s.2.2
+ *   GET   /api/v1/resellers/me/tenants/{tenantId}/integration/status     s.1.1/2
+ *   POST  /api/v1/resellers/me/tenants/{tenantId}/integration/test-connection s.1.1
+ *   POST  /api/v1/resellers/me/tenants/{tenantId}/integration/connect
+ *     410 { error: 'endpoint_removed' }   the one breaking change (s.2.3, 9)
  *     authenticated with X-Reseller-Key, NOT with the webhook HMAC.
  *
  *   POST /api/v1/mock/orders        seed an order "WeAreDA delivered to you"
@@ -54,7 +70,10 @@ const MAX_PRODUCTS = 500;
 const MAX_BYTES = 512 * 1024;
 
 const seenEventIds = new Map(); // `${connection}:${type}:${id}` -> operationId
-const integrations = new Map(); // tenantId -> stored integration
+// TWO SCOPES (contract 2), stored as two maps on purpose: the bug the removed
+// `connect` had was writing the first one from a tenant-scoped URL.
+const integrations = new Map(); // provider -> reseller-wide integration
+const connections = new Map(); // tenantId  -> per-customer connection
 const orders = new Map(); // reference -> order row
 const operations = []; // integration_operations, newest last
 const RULE = '-'.repeat(50);
@@ -109,7 +128,7 @@ const SYNC_PRODUCTS_KEYS = [
   'itemsKey',
   'fieldMap',
 ];
-const SYNC_ORDERS_KEYS = ['path', 'idempotencyHeader', 'orderIdField'];
+const SYNC_ORDERS_KEYS = ['path', 'idempotencyHeader', 'orderIdField', 'requiresTaxId'];
 
 /** connector support n platform ceiling n mode. The declaration is not an input. */
 function effectiveCapabilities(mode) {
@@ -121,92 +140,55 @@ function effectiveCapabilities(mode) {
   return result;
 }
 
-/**
- * Validates a connect body (contract 1.1, 2, 6.1 and 7).
- *
- * Unknown keys INSIDE syncConfig are rejected loudly; unknown keys at the TOP
- * LEVEL of the body are dropped in silence - `productsSyncMode` among them,
- * because it is a response field.
- */
-function validateConnect(rawBody, stored) {
-  const errors = [];
-  const bad = (error, message) => errors.push({ error, message });
-  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : {};
-  if (body !== rawBody) bad('invalid_request', 'The connect body must be a JSON object.');
-
-  if (typeof body.baseUrl !== 'string' || body.baseUrl === '') {
-    bad('invalid_request', 'baseUrl is required in every integrationMode, including receive_only.');
+/** Shared syncConfig whitelist (contract 7). Unknown options are rejected. */
+function validateSyncConfig(sync, mode, bad) {
+  if (sync === undefined) return;
+  if (!sync || typeof sync !== 'object' || Array.isArray(sync)) {
+    bad('invalid_sync_config', 'syncConfig must be an object.');
+    return;
   }
-  if (body.integrationMode !== undefined && !INTEGRATION_MODES.includes(body.integrationMode)) {
-    bad('invalid_request', `integrationMode must be one of: ${INTEGRATION_MODES.join(' | ')}.`);
-  }
-  if (body.orderStatusWrite !== undefined && typeof body.orderStatusWrite !== 'boolean') {
-    bad('invalid_request', 'orderStatusWrite must be a boolean. The string "true" is not one.');
-  }
-  if (body.declaredCapabilities !== undefined) {
-    const declared = body.declaredCapabilities;
-    if (!declared || typeof declared !== 'object' || Array.isArray(declared)) {
-      bad('invalid_request', 'declaredCapabilities must be an object of boolean capability keys.');
-    } else {
-      for (const [key, value] of Object.entries(declared)) {
-        if (!CAPABILITY_KEYS.includes(key)) {
-          bad(
-            'invalid_request',
-            `declaredCapabilities.${key} is not a capability. Accepted: ${CAPABILITY_KEYS.join(', ')}.` +
-              (key === 'integrationMode' || key === 'orderStatusWrite'
-                ? ` ${key} is a TOP-LEVEL connect field.`
-                : ''),
-          );
-        } else if (typeof value !== 'boolean') {
-          bad('invalid_request', `declaredCapabilities.${key} must be a boolean.`);
-        }
-      }
+  for (const key of Object.keys(sync)) {
+    if (!SYNC_CONFIG_KEYS.includes(key)) {
+      bad(
+        'invalid_sync_config',
+        `syncConfig.${key} is not a known option.` +
+          (key === 'integrationMode'
+            ? ' integrationMode is a TOP-LEVEL field of the integration body.'
+            : key === 'orderStatusWrite'
+              ? ' orderStatusWrite is a TENANT field - it belongs to the attach body.'
+              : ''),
+      );
     }
   }
-
-  const sync = body.syncConfig;
-  if (sync !== undefined) {
-    if (!sync || typeof sync !== 'object' || Array.isArray(sync)) {
-      bad('invalid_sync_config', 'syncConfig must be an object.');
-    } else {
-      for (const key of Object.keys(sync)) {
-        if (!SYNC_CONFIG_KEYS.includes(key)) {
-          bad(
-            'invalid_sync_config',
-            `syncConfig.${key} is not a known option.` +
-              (key === 'integrationMode' || key === 'orderStatusWrite'
-                ? ` ${key} is a TOP-LEVEL connect field.`
-                : ''),
-          );
-        }
-      }
-      for (const key of Object.keys(sync.products ?? {})) {
-        if (!SYNC_PRODUCTS_KEYS.includes(key)) {
-          bad('invalid_sync_config', `syncConfig.products.${key} is not a known option.`);
-        }
-      }
-      for (const key of Object.keys(sync.orders ?? {})) {
-        if (!SYNC_ORDERS_KEYS.includes(key)) {
-          bad('invalid_sync_config', `syncConfig.orders.${key} is not a known option.`);
-        }
-      }
+  for (const key of Object.keys(sync.products ?? {})) {
+    if (!SYNC_PRODUCTS_KEYS.includes(key)) {
+      bad('invalid_sync_config', `syncConfig.products.${key} is not a known option.`);
     }
   }
-
-  // Omitting a field on a reconnect leaves the stored value unchanged. A
-  // pre-integrationMode integration with products.mode "push" resolves to
-  // receive_and_send.
-  const mode = INTEGRATION_MODES.includes(body.integrationMode)
-    ? body.integrationMode
-    : (stored?.integrationMode ??
-      (stored?.productsMode === 'push' ? 'receive_and_send' : 'query_and_send'));
-  const orderStatusWrite =
-    typeof body.orderStatusWrite === 'boolean'
-      ? body.orderStatusWrite
-      : (stored?.orderStatusWrite ?? false);
-
+  for (const key of Object.keys(sync.orders ?? {})) {
+    if (!SYNC_ORDERS_KEYS.includes(key)) {
+      bad('invalid_sync_config', `syncConfig.orders.${key} is not a known option.`);
+    }
+  }
+  if (sync.orders?.requiresTaxId !== undefined && typeof sync.orders.requiresTaxId !== 'boolean') {
+    bad('invalid_sync_config', 'syncConfig.orders.requiresTaxId must be a boolean.');
+  }
+  for (const host of sync.documentHosts ?? []) {
+    // Bare hostnames only: never a URL, port, path, or IP literal (7, 9).
+    if (
+      typeof host !== 'string' ||
+      /[/:@]/.test(host) ||
+      /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
+      !host.includes('.')
+    ) {
+      bad(
+        'invalid_sync_config',
+        `syncConfig.documentHosts ${JSON.stringify(host)} must be a BARE hostname.`,
+      );
+    }
+  }
   const derived = MODE_SHAPES[mode].productsSyncMode;
-  const requestedProductsMode = sync?.products?.mode;
+  const requestedProductsMode = sync.products?.mode;
   if (
     (requestedProductsMode === 'pull' || requestedProductsMode === 'push') &&
     requestedProductsMode !== derived
@@ -217,7 +199,215 @@ function validateConnect(rawBody, stored) {
         `which derives "${derived}". This is a 400, not a precedence rule.`,
     );
   }
+}
 
+/** Contract 7.1 - named top-level keys replace whole; null deletes. */
+function mergeSyncConfig(current = {}, patch) {
+  if (patch === undefined) return { ...current };
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
+/** Fields that belong to the OTHER scope, and where each one goes (contract 2). */
+const INTEGRATION_SCOPE_FIELDS = {
+  baseUrl: 'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  authType: 'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  credentialScope: 'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  integrationMode: 'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  declaredCapabilities:
+    'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  syncConfig: 'POST /api/v1/resellers/me/integrations (or PATCH /integrations/{provider})',
+  webhookSecret: 'PUT /integrations/{provider}/webhook-secret',
+};
+const TENANT_SCOPE_FIELDS = {
+  orderDeliveryStatus: 'POST .../tenants/{tenantId}/integration/attach',
+  orderStatusWrite: 'POST .../tenants/{tenantId}/integration/attach',
+  externalTenantId: 'POST .../tenants/{tenantId}/integration/attach',
+};
+
+const KNOWN_CREATE_KEYS = [
+  'provider',
+  'baseUrl',
+  'authType',
+  'credentialScope',
+  'externalCredentials',
+  'webhookSecret',
+  'integrationMode',
+  'declaredCapabilities',
+  'syncConfig',
+];
+
+/**
+ * Validates POST /api/v1/resellers/me/integrations (contract 2.1).
+ *
+ * Unknown keys INSIDE syncConfig are rejected loudly; unknown keys at the TOP
+ * LEVEL of the body are dropped in silence - `productsSyncMode` among them,
+ * because it is a response field.
+ */
+function validateCreate(rawBody, existing) {
+  const errors = [];
+  const bad = (error, message) => errors.push({ error, message });
+  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : {};
+  if (body !== rawBody) bad('invalid_request', 'The body must be a JSON object.');
+
+  if (existing) {
+    bad(
+      'integration_exists',
+      `An integration already exists for provider "${existing.provider}". This is a create, ` +
+        'not an upsert: use PATCH /integrations/{provider}.',
+    );
+  }
+  if (typeof body.provider !== 'string' || body.provider === '') {
+    bad('invalid_request', 'provider is required.');
+  }
+  if (typeof body.baseUrl !== 'string' || body.baseUrl === '') {
+    bad('invalid_request', 'baseUrl is required in every integrationMode, including receive_only.');
+  }
+  if (body.integrationMode !== undefined && !INTEGRATION_MODES.includes(body.integrationMode)) {
+    bad('invalid_request', `integrationMode must be one of: ${INTEGRATION_MODES.join(' | ')}.`);
+  }
+  if (
+    body.credentialScope !== undefined &&
+    !['reseller', 'tenant'].includes(body.credentialScope)
+  ) {
+    bad('invalid_request', 'credentialScope must be "reseller" or "tenant".');
+  }
+  const credentialScope = body.credentialScope ?? 'reseller';
+  if (credentialScope === 'reseller') {
+    if (!body.externalCredentials || typeof body.externalCredentials !== 'object') {
+      bad('invalid_request', 'externalCredentials is required at credentialScope "reseller".');
+    }
+  } else if (body.externalCredentials !== undefined) {
+    bad(
+      'invalid_request',
+      'externalCredentials does not belong here at credentialScope "tenant": it comes with ' +
+        'each POST .../integration/attach.',
+    );
+  }
+  for (const [key, where] of Object.entries(TENANT_SCOPE_FIELDS)) {
+    if (body[key] !== undefined) {
+      bad('invalid_request', `${key} is a TENANT setting. It belongs to ${where}.`);
+    }
+  }
+  validateDeclared(body.declaredCapabilities, bad);
+
+  const mode = INTEGRATION_MODES.includes(body.integrationMode)
+    ? body.integrationMode
+    : 'query_and_send';
+  validateSyncConfig(body.syncConfig, mode, bad);
+
+  return { errors, mode, credentialScope, syncConfig: body.syncConfig ?? {} };
+}
+
+/**
+ * Validates PATCH /api/v1/resellers/me/integrations/{provider} (2.3, 7.1).
+ *
+ * Rotation is never a side effect: a credential or webhook secret here is a
+ * 400 naming the PUT that does it.
+ */
+function validatePatch(rawBody, stored, tenants) {
+  const errors = [];
+  const bad = (error, message) => errors.push({ error, message });
+  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : {};
+  if (body !== rawBody) bad('invalid_request', 'The body must be a JSON object.');
+
+  if (body.externalCredentials !== undefined) {
+    bad(
+      'invalid_request',
+      'externalCredentials is not patchable: use PUT /integrations/{provider}/credentials.',
+    );
+  }
+  if (body.webhookSecret !== undefined) {
+    bad(
+      'invalid_request',
+      'webhookSecret is not patchable: use PUT /integrations/{provider}/webhook-secret.',
+    );
+  }
+  for (const [key, where] of Object.entries(TENANT_SCOPE_FIELDS)) {
+    if (body[key] !== undefined) {
+      bad('invalid_request', `${key} is a TENANT setting. It belongs to ${where}.`);
+    }
+  }
+  if (body.integrationMode !== undefined && !INTEGRATION_MODES.includes(body.integrationMode)) {
+    bad('invalid_request', `integrationMode must be one of: ${INTEGRATION_MODES.join(' | ')}.`);
+  }
+  validateDeclared(body.declaredCapabilities, bad);
+
+  const mode = INTEGRATION_MODES.includes(body.integrationMode)
+    ? body.integrationMode
+    : stored.integrationMode;
+  if (body.syncConfig?.products && 'mode' in body.syncConfig.products) {
+    bad(
+      'invalid_sync_config',
+      'syncConfig.products.mode is not settable: patch integrationMode instead.',
+    );
+  }
+  const merged = mergeSyncConfig(stored.syncConfig, body.syncConfig);
+  validateSyncConfig(merged, mode, bad);
+
+  const stranded = MODE_SHAPES[mode].orderDelivery
+    ? []
+    : tenants.filter(([, connection]) => connection.orderStatusWrite === true);
+  if (stranded.length > 0) {
+    bad(
+      'order_status_write_conflict',
+      `integrationMode "${mode}" delivers no orders, but ${stranded.length} attached ` +
+        `customer(s) opted into orderStatusWrite: ${stranded.map(([id]) => id).join(', ')}.`,
+    );
+  }
+
+  const touchesSchedule =
+    body.integrationMode !== undefined ||
+    ['enabled', 'frequency', 'scheduleExpression'].some((key) => key in (body.syncConfig ?? {}));
+
+  return { errors, mode, syncConfig: merged, touchesSchedule };
+}
+
+/**
+ * Validates POST .../tenants/{tenantId}/integration/attach (contract 2.2), and
+ * the per-tenant PATCH that takes the same fields.
+ *
+ * An INTEGRATION-level field here is a 400 that names where it belongs: this
+ * is exactly the mistake the removed `connect` made impossible to notice.
+ */
+function validateAttach(rawBody, integration, stored) {
+  const errors = [];
+  const bad = (error, message) => errors.push({ error, message });
+  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : {};
+  if (body !== rawBody) bad('invalid_request', 'The body must be a JSON object.');
+
+  if (!integration) {
+    bad(
+      'integration_not_found',
+      `No integration exists for provider "${body.provider ?? '(missing)'}". Create it once ` +
+        'with POST /api/v1/resellers/me/integrations.',
+    );
+  }
+  for (const [key, where] of Object.entries(INTEGRATION_SCOPE_FIELDS)) {
+    if (body[key] !== undefined) {
+      bad(
+        'invalid_request',
+        `${key} is an INTEGRATION setting, shared by every tenant of yours. It belongs to ` +
+          `${where}. Attaching a customer must never reconfigure the others.`,
+      );
+    }
+  }
+  if (body.orderStatusWrite !== undefined && typeof body.orderStatusWrite !== 'boolean') {
+    bad('invalid_request', 'orderStatusWrite must be a boolean. The string "true" is not one.');
+  }
+  if (body.externalCredentials !== undefined && integration?.credentialScope !== 'tenant') {
+    bad('invalid_request', 'externalCredentials belongs here only at credentialScope "tenant".');
+  }
+
+  const mode = integration?.integrationMode ?? 'query_and_send';
+  const orderStatusWrite =
+    typeof body.orderStatusWrite === 'boolean'
+      ? body.orderStatusWrite
+      : (stored?.orderStatusWrite ?? false);
   if (orderStatusWrite && !MODE_SHAPES[mode].orderDelivery) {
     bad(
       'invalid_request',
@@ -226,7 +416,36 @@ function validateConnect(rawBody, stored) {
     );
   }
 
-  return { errors, mode, orderStatusWrite, productsSyncMode: derived };
+  return {
+    errors,
+    mode,
+    orderStatusWrite,
+    orderDeliveryStatus: body.orderDeliveryStatus ?? stored?.orderDeliveryStatus ?? 'confirmed',
+    externalTenantId: body.externalTenantId ?? stored?.externalTenantId ?? null,
+  };
+}
+
+function validateDeclared(declared, bad) {
+  if (declared === undefined) return;
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) {
+    bad('invalid_request', 'declaredCapabilities must be an object of boolean capability keys.');
+    return;
+  }
+  for (const [key, value] of Object.entries(declared)) {
+    if (!CAPABILITY_KEYS.includes(key)) {
+      bad(
+        'invalid_request',
+        `declaredCapabilities.${key} is not a capability. Accepted: ${CAPABILITY_KEYS.join(', ')}.` +
+          (key === 'integrationMode'
+            ? ' integrationMode is a TOP-LEVEL field of the integration body.'
+            : key === 'orderStatusWrite'
+              ? ' orderStatusWrite is a TENANT field - it belongs to the attach body.'
+              : ''),
+      );
+    } else if (typeof value !== 'boolean') {
+      bad('invalid_request', `declaredCapabilities.${key} must be a boolean.`);
+    }
+  }
 }
 
 /* ========================================================================== */
@@ -313,8 +532,10 @@ function findOrder(reference) {
  * integration_operations row (result.detail / last_error_code).
  */
 function applyOrderStatus(event, tenantId, operationId) {
-  const integration = integrations.get(tenantId ?? '') ?? {};
-  const orderStatusWrite = integration.orderStatusWrite === true;
+  // orderStatusWrite is per TENANT (contract 2, 6.1): it lives on the
+  // connection, never on the reseller-wide integration.
+  const connection = connections.get(tenantId ?? '') ?? {};
+  const orderStatusWrite = connection.orderStatusWrite === true;
   const reference = event.order?.external_order_id ?? event.order?.order_number;
   const order = findOrder(event.order?.external_order_id) ?? findOrder(event.order?.order_number);
 
@@ -359,8 +580,12 @@ function applyOrderStatus(event, tenantId, operationId) {
 /* ========================================================================== */
 
 function secretFor(connectionId) {
-  for (const integration of integrations.values()) {
-    if (integration.connectionId === connectionId) return integration.webhookSecret || '';
+  // One signing secret per RESELLER (contract 9), reached through whichever
+  // customer's connection the webhook came in on.
+  for (const connection of connections.values()) {
+    if (connection.connectionId === connectionId) {
+      return integrations.get(connection.provider)?.webhookSecret || '';
+    }
   }
   return SECRET;
 }
@@ -468,130 +693,333 @@ function describe(event) {
 /* Routing                                                                    */
 /* ========================================================================== */
 
-const CONNECT_RE =
-  /^\/api\/v1\/resellers\/me\/tenants\/([^/]+)\/integration\/(connect|status|test-connection)$/;
+// INTEGRATION scope: the collection, one provider, and its two rotation paths.
+const INTEGRATIONS_RE =
+  /^\/api\/v1\/resellers\/me\/integrations(?:\/([^/]+))?(?:\/(credentials|webhook-secret))?$/;
+// TENANT scope, including the removed `connect` (410) and the bare PATCH path.
+const TENANT_INTEGRATION_RE =
+  /^\/api\/v1\/resellers\/me\/tenants\/([^/]+)\/integration(?:\/(attach|connect|status|test-connection|disconnect))?$/;
 const WEBHOOK_RE = /^\/api\/v1\/reseller-webhooks\/([^/?]+)/;
 
 /** The tenant whose integration a webhook connection belongs to. */
 function tenantForConnection(connectionId) {
-  for (const [tenantId, integration] of integrations.entries()) {
-    if (integration.connectionId === connectionId) return tenantId;
+  for (const [tenantId, connection] of connections.entries()) {
+    if (connection.connectionId === connectionId) return tenantId;
   }
   return null;
 }
 
-function integrationResponse(tenantId, integration) {
+/** The INTEGRATION as GET/POST/PATCH /integrations return it (contract 2.1, 2.3). */
+function integrationBody(integration, extra = {}) {
   const shape = MODE_SHAPES[integration.integrationMode];
   return {
-    status: 'connected',
-    provider: integration.provider ?? 'generic_http',
-    tenantId,
-    webhookUrl: `http://localhost:${PORT}/api/v1/reseller-webhooks/${integration.connectionId}`,
+    provider: integration.provider,
+    baseUrl: integration.baseUrl,
+    authType: integration.authType ?? 'api_key',
+    credentialScope: integration.credentialScope,
     webhookSecretStatus: integration.webhookSecret ? 'configured' : 'missing',
     integrationMode: integration.integrationMode,
     orderDeliveryEnabled: shape.orderDelivery,
     productsSyncMode: shape.productsSyncMode,
-    orderStatusWrite: integration.orderStatusWrite,
     effectiveCapabilities: effectiveCapabilities(integration.integrationMode),
     syncConfig: integration.syncConfig ?? {},
-    // No schedule in a mode without reads - and any schedule from a previous
-    // connect is deleted.
+    connectedTenants: [...connections.entries()]
+      .filter(([, connection]) => connection.provider === integration.provider)
+      .map(([tenantId, connection]) => ({
+        tenantId,
+        externalTenantId: connection.externalTenantId ?? null,
+      })),
+    ...extra,
+  };
+}
+
+/** The TENANT connection, as attach and .../integration/status return it (2.2). */
+function connectionResponse(tenantId, connection) {
+  const integration = integrations.get(connection.provider) ?? {};
+  const shape = MODE_SHAPES[integration.integrationMode];
+  return {
+    status: 'connected',
+    provider: connection.provider,
+    tenantId,
+    externalTenantId: connection.externalTenantId ?? null,
+    webhookUrl: `http://localhost:${PORT}/api/v1/reseller-webhooks/${connection.connectionId}`,
+    webhookSecretStatus: integration.webhookSecret ? 'configured' : 'missing',
+    integrationMode: integration.integrationMode,
+    orderDeliveryEnabled: shape.orderDelivery,
+    productsSyncMode: shape.productsSyncMode,
+    orderStatusWrite: connection.orderStatusWrite,
+    orderDeliveryStatus: connection.orderDeliveryStatus,
+    effectiveCapabilities: effectiveCapabilities(integration.integrationMode),
+    syncConfig: integration.syncConfig ?? {},
+    // No schedule in a mode without reads - and any schedule left by a
+    // previous mode is deleted.
     syncSchedule: shape.reads ? (integration.syncConfig?.frequency ?? 'daily') : null,
   };
 }
 
-async function handleConnectPlane(request, rawBody, send, tenantId, action) {
+function parseJson(rawBody, send) {
+  try {
+    return { body: rawBody === '' ? {} : JSON.parse(rawBody) };
+  } catch {
+    send(400, { error: 'invalid_request', message: 'Body is not JSON.' });
+    return { failed: true };
+  }
+}
+
+function rejected(send, errors, note) {
+  const first = errors[0];
+  const status =
+    first.error === 'integration_exists' || first.error === 'order_status_write_conflict'
+      ? 409
+      : first.error === 'integration_not_found'
+        ? 404
+        : 400;
+  return send(status, { error: first.error, message: first.message, errors }, note);
+}
+
+/* -------------------------------------------------------------------------- */
+/* INTEGRATION scope - /api/v1/resellers/me/integrations (contract 2.1, 2.3)   */
+/* -------------------------------------------------------------------------- */
+
+function handleIntegrations(request, rawBody, send, provider, sub) {
   if (request.headers['x-reseller-key'] !== RESELLER_KEY) {
     return send(401, { error: 'invalid_reseller_key' }, 'X-Reseller-Key does not match.');
   }
 
-  const stored = integrations.get(tenantId);
+  /* ---- collection ---------------------------------------------------- */
+  if (!provider) {
+    if (request.method === 'GET') {
+      return send(200, {
+        integrations: [...integrations.values()].map((integration) => integrationBody(integration)),
+      });
+    }
+    if (request.method !== 'POST') return send(404, { error: 'not_found' });
+
+    const parsed = parseJson(rawBody, send);
+    if (parsed.failed) return undefined;
+    const body = parsed.body;
+
+    const existing = integrations.get(body.provider);
+    const verdict = validateCreate(body, existing);
+    if (verdict.errors.length > 0) {
+      return rejected(
+        send,
+        verdict.errors,
+        existing
+          ? 'A create is not an upsert: your other customers keep running on what is stored.'
+          : 'Rejected whole - nothing was stored.',
+      );
+    }
+
+    const ignored = Object.keys(body).filter((key) => !KNOWN_CREATE_KEYS.includes(key));
+    const integration = {
+      provider: body.provider,
+      baseUrl: body.baseUrl,
+      authType: body.authType ?? 'api_key',
+      credentialScope: verdict.credentialScope,
+      externalCredentials: body.externalCredentials,
+      webhookSecret: body.webhookSecret ?? SECRET,
+      integrationMode: verdict.mode,
+      syncConfig: verdict.syncConfig,
+    };
+    integrations.set(integration.provider, integration);
+
+    return send(
+      201,
+      integrationBody(integration),
+      ignored.length > 0
+        ? `Silently ignored unknown top-level key(s): ${ignored.join(', ')} (the real API says nothing).`
+        : 'Created. Now attach each customer with POST .../integration/attach.',
+    );
+  }
+
+  /* ---- one integration ------------------------------------------------ */
+  const stored = integrations.get(provider);
+  if (!stored) return send(404, { error: 'integration_not_found' }, 'No such integration.');
+
+  if (sub === 'credentials' || sub === 'webhook-secret') {
+    if (request.method !== 'PUT') return send(404, { error: 'not_found' });
+    const parsed = parseJson(rawBody, send);
+    if (parsed.failed) return undefined;
+
+    if (sub === 'credentials') {
+      if (!parsed.body.externalCredentials || typeof parsed.body.externalCredentials !== 'object') {
+        return send(400, { error: 'invalid_request', message: 'externalCredentials is required.' });
+      }
+      stored.externalCredentials = parsed.body.externalCredentials;
+      return send(
+        200,
+        { provider, rotated: 'credentials', affectedTenants: tenantsOf(provider).length },
+        'Rotation is never a side effect of an edit - this is the only call that does it.',
+      );
+    }
+
+    if (typeof parsed.body.webhookSecret !== 'string' || parsed.body.webhookSecret === '') {
+      return send(400, { error: 'invalid_request', message: 'webhookSecret is required.' });
+    }
+    stored.webhookSecret = parsed.body.webhookSecret;
+    return send(
+      200,
+      { provider, rotated: 'webhookSecret', affectedTenants: tenantsOf(provider).length },
+      'One signing secret per reseller: sign every webhook with the new value from now on.',
+    );
+  }
+
+  if (request.method === 'GET') return send(200, integrationBody(stored));
+
+  if (request.method === 'PATCH') {
+    const parsed = parseJson(rawBody, send);
+    if (parsed.failed) return undefined;
+    const body = parsed.body;
+
+    const tenants = tenantsOf(provider);
+    const verdict = validatePatch(body, stored, tenants);
+    if (verdict.errors.length > 0) {
+      return rejected(send, verdict.errors, 'Rejected whole - nothing was stored.');
+    }
+
+    if (body.baseUrl !== undefined) stored.baseUrl = body.baseUrl;
+    if (body.authType !== undefined) stored.authType = body.authType;
+    if (body.credentialScope !== undefined) stored.credentialScope = body.credentialScope;
+    stored.integrationMode = verdict.mode;
+    stored.syncConfig = verdict.syncConfig;
+
+    return send(
+      200,
+      integrationBody(stored, {
+        affectedTenants: tenants.length,
+        schedulesReconciled: verdict.touchesSchedule ? tenants.length : 0,
+      }),
+      'A named syncConfig section is REPLACED whole, not deep-merged (7.1).',
+    );
+  }
+
+  return send(404, { error: 'not_found' });
+}
+
+function tenantsOf(provider) {
+  return [...connections.entries()].filter(([, connection]) => connection.provider === provider);
+}
+
+/* -------------------------------------------------------------------------- */
+/* TENANT scope - /tenants/{tenantId}/integration/... (contract 2.2)           */
+/* -------------------------------------------------------------------------- */
+
+async function handleTenantIntegration(request, rawBody, send, tenantId, action) {
+  if (request.headers['x-reseller-key'] !== RESELLER_KEY) {
+    return send(401, { error: 'invalid_reseller_key' }, 'X-Reseller-Key does not match.');
+  }
+
+  // The one breaking change of this contract (2.3, 9).
+  if (action === 'connect') {
+    return send(
+      410,
+      {
+        error: 'endpoint_removed',
+        message:
+          'POST .../integration/connect was removed: it wrote reseller-wide settings from a ' +
+          'tenant-scoped URL, so connecting one customer rewrote every other customer of yours.',
+        replacements: [
+          'POST /api/v1/resellers/me/integrations',
+          'POST /api/v1/resellers/me/tenants/{tenantId}/integration/attach',
+        ],
+      },
+      'Create the integration once, then attach each customer.',
+    );
+  }
+
+  const stored = connections.get(tenantId);
 
   if (action === 'status') {
-    if (!stored) return send(404, { error: 'not_found' }, 'No integration for this tenant.');
-    return send(200, integrationResponse(tenantId, stored));
+    if (!stored)
+      return send(404, { error: 'not_found' }, 'No integration attached to this tenant.');
+    return send(200, connectionResponse(tenantId, stored));
+  }
+
+  if (action === 'disconnect') {
+    if (!stored) return send(404, { error: 'not_found' }, 'Nothing attached to this tenant.');
+    connections.delete(tenantId);
+    return send(
+      200,
+      { status: 'disconnected', tenantId, provider: stored.provider },
+      'This customer only. The integration and every other customer are untouched.',
+    );
   }
 
   if (action === 'test-connection') {
-    if (!stored) return send(404, { error: 'not_found' }, 'No integration for this tenant.');
+    if (!stored)
+      return send(404, { error: 'not_found' }, 'No integration attached to this tenant.');
+    const integration = integrations.get(stored.provider) ?? {};
     // The connection test IS a read.
-    if (!MODE_SHAPES[stored.integrationMode].reads) {
+    if (!MODE_SHAPES[integration.integrationMode].reads) {
       return send(
         422,
         { error: 'test_connection_unavailable', reason: 'read_calls_disabled' },
-        `integrationMode "${stored.integrationMode}" makes no read calls - nothing was called.`,
+        `integrationMode "${integration.integrationMode}" makes no read calls - nothing was called.`,
       );
     }
+    const credentials =
+      integration.credentialScope === 'tenant'
+        ? stored.externalCredentials
+        : integration.externalCredentials;
     try {
-      const response = await fetch(stored.baseUrl, {
-        headers: {
-          'X-API-Key': stored.externalCredentials?.apiKey ?? '',
-          Accept: 'application/json',
-        },
+      const response = await fetch(integration.baseUrl, {
+        headers: { 'X-API-Key': credentials?.apiKey ?? '', Accept: 'application/json' },
         signal: AbortSignal.timeout(10_000),
       });
       return send(
         response.ok ? 200 : 502,
         { ok: response.ok, statusCode: response.status },
-        `Called GET ${stored.baseUrl}`,
+        `Called GET ${integration.baseUrl}`,
       );
     } catch (error) {
-      return send(502, { ok: false, error: String(error) }, `GET ${stored.baseUrl} failed.`);
+      return send(502, { ok: false, error: String(error) }, `GET ${integration.baseUrl} failed.`);
     }
   }
 
-  let body;
-  try {
-    body = JSON.parse(rawBody);
-  } catch {
-    return send(400, { error: 'invalid_request', message: 'Body is not JSON.' });
-  }
+  /* ---- attach, and the per-tenant PATCH that takes the same fields ----- */
+  const parsed = parseJson(rawBody, send);
+  if (parsed.failed) return undefined;
+  const body = parsed.body;
 
-  const verdict = validateConnect(body, stored);
+  const provider = body.provider ?? stored?.provider;
+  const integration = integrations.get(provider);
+  const verdict = validateAttach(body, integration, stored);
   if (verdict.errors.length > 0) {
-    const first = verdict.errors[0];
-    return send(
-      400,
-      { error: first.error, message: first.message, errors: verdict.errors },
-      'Connect rejected whole - nothing was stored.',
+    return rejected(
+      send,
+      verdict.errors,
+      'Rejected whole - and nothing at integration scope could have been written from here.',
     );
   }
+
+  const connection = {
+    connectionId: stored?.connectionId ?? `conn_${randomUUID().slice(0, 8)}`,
+    provider,
+    orderDeliveryStatus: verdict.orderDeliveryStatus,
+    orderStatusWrite: verdict.orderStatusWrite,
+    externalTenantId: verdict.externalTenantId,
+    externalCredentials: body.externalCredentials ?? stored?.externalCredentials,
+  };
+  connections.set(tenantId, connection);
 
   const ignored = Object.keys(body).filter(
     (key) =>
       ![
         'provider',
-        'baseUrl',
-        'authType',
-        'externalCredentials',
-        'webhookSecret',
         'orderDeliveryStatus',
-        'integrationMode',
         'orderStatusWrite',
-        'declaredCapabilities',
-        'syncConfig',
+        'externalTenantId',
+        'externalCredentials',
       ].includes(key),
   );
 
-  const integration = {
-    connectionId: stored?.connectionId ?? `conn_${randomUUID().slice(0, 8)}`,
-    provider: body.provider ?? stored?.provider ?? 'generic_http',
-    baseUrl: body.baseUrl,
-    externalCredentials: body.externalCredentials ?? stored?.externalCredentials,
-    webhookSecret: body.webhookSecret ?? stored?.webhookSecret ?? SECRET,
-    orderDeliveryStatus: body.orderDeliveryStatus ?? stored?.orderDeliveryStatus ?? 'confirmed',
-    integrationMode: verdict.mode,
-    orderStatusWrite: verdict.orderStatusWrite,
-    syncConfig: body.syncConfig ?? stored?.syncConfig ?? {},
-  };
-  integrations.set(tenantId, integration);
-
   return send(
-    200,
-    integrationResponse(tenantId, integration),
+    stored ? 200 : 201,
+    connectionResponse(tenantId, connection),
     ignored.length > 0
       ? `Silently ignored unknown top-level key(s): ${ignored.join(', ')} (the real API says nothing).`
-      : undefined,
+      : 'Idempotent per customer: an omitted field kept its stored value.',
   );
 }
 
@@ -705,14 +1133,32 @@ const server = createServer((request, response) => {
       );
     };
 
-    const connectMatch = CONNECT_RE.exec(path);
-    if (connectMatch) {
-      const [, tenantId, action] = connectMatch;
-      const expected = action === 'status' ? 'GET' : 'POST';
-      if (request.method !== expected) return send(404, { error: 'not_found' });
-      handleConnectPlane(request, rawBody, send, decodeURIComponent(tenantId), action).catch(
-        (error) => send(500, { error: 'internal_error', message: String(error) }),
+    const integrationsMatch = INTEGRATIONS_RE.exec(path);
+    if (integrationsMatch) {
+      const [, provider, sub] = integrationsMatch;
+      return handleIntegrations(
+        request,
+        rawBody,
+        send,
+        provider ? decodeURIComponent(provider) : undefined,
+        sub,
       );
+    }
+
+    const tenantMatch = TENANT_INTEGRATION_RE.exec(path);
+    if (tenantMatch) {
+      const [, tenantId, action] = tenantMatch;
+      // The bare .../integration path is the per-tenant PATCH; everything else
+      // has its own verb.
+      const expected = action === 'status' ? 'GET' : action === undefined ? 'PATCH' : 'POST';
+      if (request.method !== expected) return send(404, { error: 'not_found' });
+      handleTenantIntegration(
+        request,
+        rawBody,
+        send,
+        decodeURIComponent(tenantId),
+        action ?? 'attach',
+      ).catch((error) => send(500, { error: 'internal_error', message: String(error) }));
       return;
     }
 
@@ -736,7 +1182,7 @@ server.listen(PORT, () => {
   console.log('='.repeat(50));
   console.log('');
   console.log('This is NOT WeAreDA. It imitates the response contract (1.1, 2,');
-  console.log('6.0, 6.1) so you can test the Reseller -> WeAreDA direction locally.');
+  console.log('6.0, 6.1, 7.1) so you can test the Reseller -> WeAreDA direction locally.');
   console.log('');
   console.log('Put these in your .env:');
   console.log('');
@@ -748,8 +1194,9 @@ server.listen(PORT, () => {
   console.log(`  WEAREDA_RESELLER_KEY=${RESELLER_KEY}`);
   console.log('  WEAREDA_TENANT_ID=tenant_demo');
   console.log('');
-  console.log('Then run, for example:');
-  console.log('  npm run cli -- integration:connect --mode receive_and_send');
+  console.log('Then run, for example (two scopes, two calls - contract 2):');
+  console.log('  npm run cli -- integration:create --mode receive_and_send');
+  console.log('  npm run cli -- integration:attach');
   console.log('  npm run cli -- stock P-1001 37 V-2001 5');
   console.log('');
   console.log('Inspect what the WeAreDA side did with your events:');

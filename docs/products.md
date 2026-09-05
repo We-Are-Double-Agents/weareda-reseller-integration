@@ -13,14 +13,15 @@ objects — so the implementation makes it structurally true.
 | `product.updated` | accepted (an accelerator) | accepted (the only catalog source) |
 | Archive-missing sweep | yes, on full/reconciliation pulls | never — use `status: "archived"` |
 | Sync cursor | advances on a successful pull | unused |
-| Sync schedule | created | **not created**, and one left by a previous connect is deleted |
+| Sync schedule | created | **not created**, and one left by a previous mode is deleted |
 
 ### You do not set the transport. The mode derives it.
 
 `productsSyncMode` follows from `integrationMode` (contract §1.1) — `pull` for
-`query_*`, `push` for `receive_*` — and it comes back in the connect response.
+`query_*`, `push` for `receive_*` — and it comes back in the integration
+response.
 
-| What you send at connect time | What happens |
+| What you send when creating or patching the integration | What happens |
 |---|---|
 | `"integrationMode": "receive_and_send"` | `productsSyncMode: "push"`. This is how you choose push. |
 | nothing | `query_and_send` → `pull` |

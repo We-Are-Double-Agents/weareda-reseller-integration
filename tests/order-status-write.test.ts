@@ -4,7 +4,7 @@
  *
  * `integration_status` always moves. `orders.status` - the CUSTOMER-FACING
  * column the tenant's staff see and edit - moves only when the tenant
- * registered `orderStatusWrite: true` at connect time.
+ * registered `orderStatusWrite: true` when that customer was attached.
  */
 import { describe, expect, it } from 'vitest';
 import {

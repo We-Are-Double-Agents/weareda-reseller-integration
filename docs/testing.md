@@ -25,8 +25,8 @@ files run in parallel without sharing state.
 | `tests/hmac.test.ts` | A known HMAC vector, `sha256=` hex format, sensitivity to body and secret, verification, the re-serialization trap (`1.0` → `1`), event id format and uniqueness, RFC3339 timestamps, one-event-type-per-request enforcement, builder validation. |
 | `tests/webhook-client.test.ts` | Delivery against a real receiver, sent bytes == signed bytes, the three headers, timestamp inside the replay window, `401` on a corrupt signature, `200 {deduped:true}` on a repeated event id, `5xx` retried with the same id and body, `4xx` not retried, batched stock lines, the 500-item and 512 KB caps, dry run, network failure. |
 | `tests/event-history.test.ts` | Inbound and outbound history rows, no credentials or signatures stored, the three debug endpoints, disabling them, the PDF fixture and path-traversal refusal. |
-| `tests/read-api.test.ts` | The `X-Reseller-Key` plane: correct header, explicitly *not* the HMAC or connector key, no `X-Tenant-Id`, cursor pass-through, all four read endpoints, `401 invalid_reseller_key`, path encoding, a clear error when configuration is missing — and the connect plane on the same key: `integration/connect` with both new fields at the top level, `integration/status` echoing the mode, and `422 read_calls_disabled` from `test-connection`. |
-| `tests/integration-mode.test.ts` | The four modes and their two axes; `ordersWrite` switched off without delivery; `productsRead` staying on without reads; capabilities as connector ∩ ceiling ∩ mode, never the declaration; back-compat from `products.mode: "push"`; every documented connect `400` (bad mode, string `"true"`, the cross-field rule, nesting in `declaredCapabilities` / `syncConfig`, contradictory `products.mode`, missing `baseUrl`); unknown top-level keys dropped while unknown `syncConfig` keys are rejected; reconnect leaving stored values alone — and, for each of the four modes, that the sandbox really registers only the routes that mode receives. |
+| `tests/read-api.test.ts` | The `X-Reseller-Key` plane: correct header, explicitly *not* the HMAC or connector key, no `X-Tenant-Id`, cursor pass-through, all four read endpoints, `401 invalid_reseller_key`, path encoding, a clear error when configuration is missing — and the configuration plane on the same key, in both scopes: `POST /integrations` carrying nothing per-tenant, `attach` carrying nothing reseller-wide and returning that customer's `webhookUrl`, `GET`/`PATCH` with `affectedTenants`/`schedulesReconciled`, the two rotation `PUT`s, `disconnect`, `integration/status` echoing the mode, `422 read_calls_disabled` from `test-connection`, and the removed `connect` refused locally. |
+| `tests/integration-mode.test.ts` | The four modes and their two axes; `ordersWrite` switched off without delivery; `productsRead` staying on without reads; capabilities as connector ∩ ceiling ∩ mode, never the declaration; back-compat from `products.mode: "push"`; the **two scopes** — a field of the other scope refused in both directions, `credentialScope` deciding where the credential may travel, `409 integration_exists` on a second create, `404 integration_not_found` on an early attach; every documented `400` (bad mode, string `"true"`, the cross-field rule, nesting in `declaredCapabilities` / `syncConfig`, contradictory `products.mode`, missing `baseUrl`, and the §7 value table down to `documentHosts` refusing an IP literal); the §7.1 merge (named sections replaced whole, `null` deleting, the merged result re-validated) and `409 order_status_write_conflict`; unknown top-level keys dropped while unknown `syncConfig` keys are rejected; re-attaching leaving stored values alone — and, for each of the four modes, that the sandbox really registers only the routes that mode receives. |
 | `tests/order-status-write.test.ts` | Both mapping columns including the five `returned` aliases; `shipped`/`delivered` collapsing in one column but not the other; `fulfilled → shipped`; the ladder advancing and discarding late rungs; the two exceptions applying from anywhere; `order_status_conflict`; the opt-in off leaving `orders.status` frozen; every `result.detail` string and `last_error_code`; and `shipped_at`/`delivered_at` filled only when blank. |
 
 ## The HMAC test vector
@@ -79,8 +79,8 @@ npm run cli -- stock P-1001 37 V-2001 5
 npm run cli -- stock P-1001 37 --event-id evt_x    # then repeat it: 200 deduped
 ```
 
-The mock also serves the connect plane and applies the `order.status` ladder, so
-the whole connect-time contract is testable locally:
+The mock also serves the configuration plane in both scopes and applies the
+`order.status` ladder, so the whole of contract §2 is testable locally:
 
 ```env
 WEAREDA_API_BASE_URL=http://localhost:4000
@@ -89,7 +89,9 @@ WEAREDA_TENANT_ID=tenant_demo
 ```
 
 ```bash
-npm run cli -- integration:connect --mode query_and_send --order-status-write
+npm run cli -- integration:create --mode query_and_send
+npm run cli -- integration:attach --order-status-write
+npm run cli -- integration:list
 npm run cli -- integration:status
 npm run cli -- integration:test
 

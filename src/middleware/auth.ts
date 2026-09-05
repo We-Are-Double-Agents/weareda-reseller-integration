@@ -1,7 +1,8 @@
 /**
  * Inbound authentication - direction: WeAreDA -> Reseller (contract 3.1).
  *
- * WeAreDA attaches the credentials you registered at connect time, according to
+ * WeAreDA attaches the credentials you registered on the integration (or, at
+ * credentialScope 'tenant', when you attached this customer), according to
  * the `authType` you chose:
  *
  *   authType   Header WeAreDA sends

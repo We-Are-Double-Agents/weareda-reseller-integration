@@ -10,12 +10,16 @@
  */
 import { config as loadDotenv } from 'dotenv';
 import {
+  CREDENTIAL_SCOPES,
+  DEFAULT_CREDENTIAL_SCOPE,
   DEFAULT_INTEGRATION_MODE,
   INTEGRATION_MODES,
+  isCredentialScope,
   isIntegrationMode,
   modeDeliversOrders,
   modeReads,
   productsSyncModeFor,
+  type CredentialScope,
   type IntegrationMode,
 } from '../weareda/integration-mode.js';
 
@@ -54,6 +58,21 @@ function integrationMode(): IntegrationMode {
   if (!isIntegrationMode(raw)) {
     throw new Error(
       `INTEGRATION_MODE must be one of: ${INTEGRATION_MODES.join(', ')} (received "${raw}")`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * CREDENTIAL_SCOPE - who owns the connector credential (contract 2).
+ * `reseller` (the default) is one credential for every customer; `tenant` is
+ * one per customer, sent with each attach rather than at creation.
+ */
+function credentialScope(): CredentialScope {
+  const raw = str('CREDENTIAL_SCOPE', DEFAULT_CREDENTIAL_SCOPE).toLowerCase();
+  if (!isCredentialScope(raw)) {
+    throw new Error(
+      `CREDENTIAL_SCOPE must be one of: ${CREDENTIAL_SCOPES.join(', ')} (received "${raw}")`,
     );
   }
   return raw;
@@ -102,20 +121,27 @@ export interface AppConfig {
   };
 
   /**
-   * Connect-time integration settings (contract 1.1, 2, 6.1). These are registered with
-   * WeAreDA - `npm run cli -- integration:connect` sends them - and mirrored
-   * here so the sandbox behaves the way the registration says it will.
+   * Integration settings (contract 1.1, 2, 6.1), split by SCOPE exactly as the
+   * API is. `integration:create` sends the reseller-wide ones and
+   * `integration:attach` the per-tenant ones; both are mirrored here so the
+   * sandbox behaves the way the registration says it will.
    */
   integration: {
-    /** Per RESELLER. Governs which calls WeAreDA makes to us. */
+    /** INTEGRATION scope. Which of your integrations these calls address. */
+    provider: string;
+    /** INTEGRATION scope. Governs which calls WeAreDA makes to us. */
     mode: IntegrationMode;
+    /** INTEGRATION scope. Who owns the connector credential (contract 2). */
+    credentialScope: CredentialScope;
+    /** TENANT scope. Your own id for this customer, if you have one. */
+    externalTenantId: string;
     /**
-     * Per TENANT. Whether an inbound order.status may move the CUSTOMER-FACING
-     * orders.status, not just integration_status.
+     * TENANT scope. Whether an inbound order.status may move the
+     * CUSTOMER-FACING orders.status, not just integration_status.
      *
      * On the wire this must be a strict boolean - the string "true" is a 400.
      * Here it is an environment variable, so it is parsed leniently like every
-     * other flag; the strictness lives in validateConnectBody().
+     * other flag; the strictness lives in validateAttachBody().
      */
     orderStatusWrite: boolean;
   };
@@ -149,7 +175,10 @@ export function loadConfig(): AppConfig {
       tenantId: str('WEAREDA_TENANT_ID'),
     },
     integration: {
+      provider: str('INTEGRATION_PROVIDER', 'generic_http'),
       mode: integrationMode(),
+      credentialScope: credentialScope(),
+      externalTenantId: str('EXTERNAL_TENANT_ID'),
       orderStatusWrite: bool('ORDER_STATUS_WRITE', false),
     },
   };
