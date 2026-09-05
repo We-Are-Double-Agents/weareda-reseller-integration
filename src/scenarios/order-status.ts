@@ -14,7 +14,8 @@
  *               an ordinary outcome.
  *
  * The customer-facing column only moves when the tenant registered
- * `orderStatusWrite: true` at connect time. Both settings are shown below.
+ * `orderStatusWrite: true` when that customer was attached. Both settings are
+ * shown below.
  */
 import { createScenarioContext, scenarioBanner, step, webhookModeNotice } from './harness.js';
 import { buildOrderStatusEvent } from '../weareda/events.js';

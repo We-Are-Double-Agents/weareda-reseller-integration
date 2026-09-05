@@ -144,10 +144,13 @@ freezes a *value*, not an *absence*.
 
 ### If you cannot invoice without one
 
-Set `syncConfig.orders.requiresTaxId: true` at connect time (§4.3.2, §7):
+Set `syncConfig.orders.requiresTaxId: true` on the integration (§4.3.2, §7) —
+it is reseller-wide, like the rest of `syncConfig`:
 
 ```bash
-npm run cli -- integration:connect --requires-tax-id
+npm run cli -- integration:create --requires-tax-id
+# already created? it is one PATCH:
+npm run cli -- integration:patch --sync-config '{"orders":{"requiresTaxId":true}}'
 ```
 
 WeAreDA then **never delivers** an order whose customer has no fiscal id — it is
@@ -332,8 +335,9 @@ npm run cli -- order-status SO-10001 delivered
 
 `integration_status` always moves. The **customer-facing** `orders.status` — the
 column the tenant's staff see and edit in the CRM — moves only when the tenant
-registered `orderStatusWrite: true` at connect time
-([integration-modes.md](integration-modes.md#orderstatuswrite)).
+registered `orderStatusWrite: true` when that customer was attached
+([integration-modes.md](integration-modes.md#orderstatuswrite)) — it is a
+per-tenant setting, not a reseller-wide one.
 
 | Your `state` (aliases) | → `integration_status` | → `orders.status` *(opt-in only)* |
 |---|---|---|

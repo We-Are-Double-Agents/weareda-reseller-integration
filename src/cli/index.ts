@@ -19,7 +19,16 @@ import { orderStatusCommand } from './commands/order-status.js';
 import { productUpdateCommand } from './commands/product-update.js';
 import { invoiceCommand } from './commands/invoice.js';
 import {
+  integrationAttachCommand,
   integrationConnectCommand,
+  integrationCreateCommand,
+  integrationDisconnectCommand,
+  integrationGetCommand,
+  integrationListCommand,
+  integrationPatchCommand,
+  integrationRetryCommand,
+  integrationRotateCredentialsCommand,
+  integrationRotateSecretCommand,
   integrationStatusCommand,
   integrationTestCommand,
 } from './commands/integration.js';
@@ -66,25 +75,51 @@ Webhook events (contract 6). One event type per HTTP request, always.
         is issued against (contract 4.3), masked.
           npm run cli -- invoice SO-10001
 
-Integration configuration (contract 1.1, 2, 6.1) - the X-Reseller-Key plane.
+Integration configuration (contract 1.1, 2, 6.1, 7.1) - the X-Reseller-Key
+plane. TWO SCOPES, TWO CALLS: create the integration once, attach each customer.
 
-  integration:connect [--mode <mode>] [--order-status-write] [--requires-tax-id]
-                      [--base-url ...]
-        Registers the integration. integrationMode and orderStatusWrite are
-        TOP-LEVEL fields of the connect body, siblings of orderDeliveryStatus.
-        --requires-tax-id is different: it is syncConfig.orders.requiresTaxId
-        (contract 4.3.2), and it makes WeAreDA hold back an order whose customer
-        has no fiscal id instead of you rejecting it on arrival.
+  integration:create [--mode <mode>] [--credential-scope reseller|tenant]
+                     [--requires-tax-id] [--base-url ...]
+        INTEGRATION scope (contract 2.1) - one per (reseller, provider), shared
+        by EVERY tenant of yours. Run it ONCE: a second call for the same
+        provider is 409 integration_exists, so it can never overwrite what your
+        other customers are running on.
         Modes: query_and_send (default) | receive_and_send | query_only |
                receive_only
-          npm run cli -- integration:connect --mode receive_and_send
-          npm run cli -- integration:connect --mode query_and_send --order-status-write
-          npm run cli -- integration:connect --requires-tax-id
+          npm run cli -- integration:create --mode receive_and_send
+          npm run cli -- integration:create --requires-tax-id
+  integration:attach [--order-status-write] [--external-tenant-id cust-7]
+                     [--order-delivery-status confirmed]
+        TENANT scope (contract 2.2) - one call per customer, and it cannot
+        reach anything integration:create configured. The response carries this
+        customer's webhookUrl.
+          npm run cli -- integration:attach --order-status-write
+  integration:list | integration:get
+        Your integrations, and the customers attached to each. Read the stored
+        syncConfig from here BEFORE patching it (7.1).
+  integration:patch [--mode m] [--base-url ...] [--frequency daily]
+                    [--document-hosts a,b] [--sync-config '{...}']
+        Partial edit at INTEGRATION scope - it affects every tenant of yours.
+        syncConfig merges by 7.1: a named section is REPLACED whole, null
+        deletes. The response reports affectedTenants and schedulesReconciled.
+  integration:rotate-credentials [--api-key ...]
+  integration:rotate-secret [--secret ...]
+        Rotation is never a side effect of an edit; each has its own PUT.
+  integration:disconnect
+        Detaches THIS customer only.
   integration:status
         Echoes integrationMode, orderDeliveryEnabled and productsSyncMode.
   integration:test
         Asks WeAreDA to call GET / on us. The connection test IS a read, so a
         receive_* mode answers 422 read_calls_disabled.
+  integration:retry <operationId>
+        Re-runs one operation - e.g. an invoice whose document host you have
+        just allow-listed (7.1).
+
+  integration:connect
+        REMOVED (410 endpoint_removed). It wrote reseller-wide settings from a
+        tenant-scoped URL, so connecting one customer rewrote all the others.
+        Use integration:create once, then integration:attach per customer.
 
 Reseller read API (contract 11) - authenticated with X-Reseller-Key, a
 DIFFERENT mechanism from the webhook HMAC.
@@ -112,9 +147,19 @@ const COMMANDS: Record<string, CommandHandler> = {
   'order-status': orderStatusCommand,
   'product-update': productUpdateCommand,
   invoice: invoiceCommand,
-  'integration:connect': integrationConnectCommand,
+  'integration:create': integrationCreateCommand,
+  'integration:attach': integrationAttachCommand,
+  'integration:list': integrationListCommand,
+  'integration:get': integrationGetCommand,
+  'integration:patch': integrationPatchCommand,
+  'integration:rotate-credentials': integrationRotateCredentialsCommand,
+  'integration:rotate-secret': integrationRotateSecretCommand,
+  'integration:disconnect': integrationDisconnectCommand,
   'integration:status': integrationStatusCommand,
   'integration:test': integrationTestCommand,
+  'integration:retry': integrationRetryCommand,
+  // Removed from the API (410). Kept here only to say what replaced it.
+  'integration:connect': integrationConnectCommand,
   'orders:list': ordersListCommand,
   'orders:get': ordersGetCommand,
   'orders:invoices': ordersInvoicesCommand,
@@ -149,8 +194,8 @@ async function main(): Promise<void> {
       `WEAREDA_WEBHOOK_URL    = ${ctx.config.webhook.url || '(not set)'}`,
       `WEAREDA_WEBHOOK_SECRET = ${mask(ctx.config.webhook.secret)}`,
       '',
-      'Both values come from the WeAreDA connect response / your integration',
-      'configuration. Fill them into .env to send for real.',
+      'The URL comes from the attach response for this customer; the secret is',
+      'the one you registered. Fill them into .env to send for real.',
     ]);
   }
 

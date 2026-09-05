@@ -89,7 +89,7 @@ If your billing genuinely cannot issue an invoice without a fiscal id, that flag
 is the answer (§4.3.2):
 
 ```bash
-npm run cli -- integration:connect --requires-tax-id
+npm run cli -- integration:create --requires-tax-id
 ```
 
 WeAreDA then never delivers such an order — it is simply not yet eligible — and
@@ -198,8 +198,8 @@ It attaches the invoice, and its stored PDF if you gave one, to the order.
 Invoice ingest is gated on the **`ordersWrite`** capability, not on a separate
 `invoices` flag. `invoices` is not yet enabled at the platform capability
 ceiling, so it is reported `false` in `effectiveCapabilities` even while invoice
-events are accepted. If you see `invoices: false` in your connect response, that
-is expected and does not mean invoice events are rejected.
+events are accepted. If you see `invoices: false` in your integration response,
+that is expected and does not mean invoice events are rejected.
 
 ---
 

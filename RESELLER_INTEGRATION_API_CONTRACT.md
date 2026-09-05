@@ -83,7 +83,7 @@ Consequences worth stating plainly:
   delivering an order is a *send*, not a query. You still register a `baseUrl` and
   still implement `POST /orders` and its cancel.
 - **In any mode where we do not read**, no sync schedule is created (and one left by
-  a previous connect is removed), `GET /products` is never called, and
+  a previous mode is removed), `GET /products` is never called, and
   `POST …/integration/test-connection` is refused with `422 read_calls_disabled` —
   the test *is* a read. Your catalog then reaches us **only** through
   `product.updated`; stop publishing and it simply stops updating, with no error.
@@ -91,7 +91,7 @@ Consequences worth stating plainly:
   the integration's effective capabilities, so orders never enter the delivery queue
   at all. Nothing is queued and later refused — the connection is simply not a
   candidate.
-- **`receive_only` still requires a `baseUrl`** at connect time, even though nothing
+- **`receive_only` still requires a `baseUrl`** when you create the integration, even though nothing
   is ever sent to it. It is registered, not called.
 - **`orderStatusWrite` (§6.1) needs a mode that delivers orders.** Combining it with
   `query_only` or `receive_only` is refused with a `400`: those resellers never
@@ -104,7 +104,7 @@ not a precedence puzzle. An integration configured before this setting existed w
 `products.mode: "push"` reads as **`receive_and_send`** (reads off, orders still
 delivered); nothing to change.
 
-The connect response and `GET …/integration/status` both echo the resolved
+The integration response and `GET …/integration/status` both echo the resolved
 `integrationMode` and `orderDeliveryEnabled`.
 
 ---
@@ -123,30 +123,56 @@ the **defaults**; every one is overridable per integration via `sync_config`
 
 ---
 
-## 2. Configuration (one-time, per customer)
+## 2. Configuration — two scopes, two calls
 
-You register an integration for each of your customers (tenants) through the
-reseller config API (see the provisioning guide for auth):
+Configuration has **two scopes**, and mixing them is what the API used to get wrong:
+
+| Scope | What lives there | Changing it affects |
+|---|---|---|
+| **Integration** — one per `(reseller, provider)` | `baseUrl`, `authType`, `credentialScope`, your credential, the webhook secret, `integrationMode`, `syncConfig` | **every tenant of yours** |
+| **Tenant connection** — one per customer | `orderDeliveryStatus`, `orderStatusWrite`, `externalTenantId`, and the credential when `credentialScope` is `tenant` | that one customer |
+
+So it is two calls: **create the integration once**, then **attach each customer**.
+
+### 2.1 Create the integration (once)
 
 ```
-POST /api/v1/resellers/me/tenants/{tenantId}/integration/connect
+POST /api/v1/resellers/me/integrations
 {
   "provider": "generic_http",
   "baseUrl": "https://api.your-erp.com/v1",     // your outbound base (https, public host)
   "authType": "api_key",                          // api_key | bearer | basic | custom
-  "externalCredentials": { "apiKey": "sk_live_…" },
-  "webhookSecret": "whsec_…",                     // optional but REQUIRED to send us webhooks
-  "orderDeliveryStatus": "confirmed",             // which order status triggers delivery
-  "orderStatusWrite": false,                      // opt-in: let order.status move the
-                                                  //   customer-facing status too (§6.1)
-  "integrationMode": "query_and_send",            // query_and_send (default) |
-                                                  //   receive_and_send | query_only |
-                                                  //   receive_only — see §1.1
+  "credentialScope": "reseller",                  // reseller (one credential) | tenant
+  "externalCredentials": { "apiKey": "sk_live_…" },  // required at reseller scope
+  "webhookSecret": "whsec_…",                     // optional, REQUIRED to send us webhooks
+  "integrationMode": "query_and_send",            // see §1.1
   "syncConfig": { }                               // optional overrides — see §7
 }
 ```
 
-The response includes your **inbound webhook URL**:
+`201` returns the integration, including its `effectiveCapabilities`. If one already
+exists for that provider you get **`409 integration_exists`** — it is a create, not
+an upsert, and will never overwrite what your other customers are running on. Use
+`PATCH` (§2.3) to change it.
+
+At `credentialScope: "tenant"` you do **not** send `externalCredentials` here —
+there is no customer yet to own them. They come with each attach.
+
+### 2.2 Attach a customer
+
+```
+POST /api/v1/resellers/me/tenants/{tenantId}/integration/attach
+{
+  "provider": "generic_http",                     // which of your integrations
+  "orderDeliveryStatus": "confirmed",             // which order status triggers delivery
+  "orderStatusWrite": false,                      // opt-in: let order.status move the
+                                                  //   customer-facing status too (§6.1)
+  "externalTenantId": "cust-7",                   // optional, your id for this customer
+  "externalCredentials": { … }                    // ONLY at credentialScope 'tenant'
+}
+```
+
+The response includes this customer's **inbound webhook URL**:
 
 ```json
 { "status": "connected", "provider": "generic_http",
@@ -154,14 +180,50 @@ The response includes your **inbound webhook URL**:
   "webhookSecretStatus": "configured", "effectiveCapabilities": { … } }
 ```
 
+Attaching is idempotent per customer, and an omitted field keeps its stored value —
+re-attaching never silently flips a setting you did not send. It **cannot** change
+anything at integration scope: an integration-level field in this body is a `400`
+naming where it belongs.
+
+Later changes to one customer go to `PATCH /api/v1/resellers/me/tenants/{tenantId}/integration`
+with the same per-tenant fields. `POST .../integration/disconnect` detaches that one
+customer and touches no other.
+
+### 2.3 Read and change the integration
+
+```
+GET   /api/v1/resellers/me/integrations              → all of yours, each with connectedTenants
+GET   /api/v1/resellers/me/integrations/{provider}
+PATCH /api/v1/resellers/me/integrations/{provider}   → partial: an omitted field is left alone
+PUT   /api/v1/resellers/me/integrations/{provider}/credentials      → rotate the credential
+PUT   /api/v1/resellers/me/integrations/{provider}/webhook-secret   → rotate the signing secret
+```
+
+`PATCH` takes `baseUrl`, `authType`, `credentialScope`, `declaredCapabilities`,
+`integrationMode` and `syncConfig` (merged, see §7.1). It answers with
+`affectedTenants` and `schedulesReconciled` so the blast radius of what you just did
+is in the response, not only in this document. Changing `integrationMode` recomputes
+your effective capabilities and reconciles the sync schedule of **every** attached
+customer; it is refused with `409 order_status_write_conflict` if it would strand
+customers who opted into `orderStatusWrite`.
+
+**Rotation is never a side effect.** Credentials and the webhook secret change only
+through their own `PUT`, never by re-sending them in a `PATCH`. Under the old
+`connect` a body carrying credentials silently replaced the secret every one of your
+customers was authenticating with.
+
+> **`POST .../integration/connect` was removed** (`410 endpoint_removed`). It took
+> both scopes in one body against a tenant-scoped URL and wrote the shared ones with
+> an upsert — so connecting one customer rewrote the `baseUrl`, auth type, credential
+> scope, capabilities and `syncConfig` of all the others, and rotated the shared
+> credential as a side effect. Replace one `connect` with §2.1 **once**, then §2.2
+> **per customer**.
+
 **Capabilities** gate which flows are active for you (a reseller cannot self-grant
 them — the platform authorizes the ceiling): `productsRead`, `stockRead`,
 `ordersWrite`, `invoices`. `productsRead` authorizes your catalog in **both**
 directions — the `GET /products` pull and the `product.updated` push are the same
 permission over two transports.
-
-The response also echoes `productsSyncMode` (`pull` | `push`) and the validated
-`syncConfig` we stored, so you can confirm what took effect.
 
 ---
 
@@ -951,13 +1013,14 @@ accelerator, so a price change shows up in seconds instead of at the next sync.
 
 ## 7. Per-integration overrides (`sync_config`)
 
-If your system's paths/params differ from the defaults, send `syncConfig` in the
-`connect` body (§2). Defaults shown:
+`sync_config` belongs to the INTEGRATION (§2), so it is one value shared by every
+one of your customers. Send it when you create the integration and edit it later
+with `PATCH /integrations/{provider}` (§7.1). Defaults shown:
 
 ```json
 {
   "integrationMode": "query_and_send",          // see §1.1 — prefer setting this at the
-                                                //   TOP LEVEL of the connect body
+                                                //   TOP LEVEL of the request body
   "products": {
     "mode": "pull",                             // derived from integrationMode; do not set
                                                 //   it to a contradictory value
@@ -980,7 +1043,7 @@ If your system's paths/params differ from the defaults, send `syncConfig` in the
 
 **Validation.** The blob is checked against a strict whitelist before it is stored —
 it steers outbound request construction and the invoice-document host allow-list, so
-it is not free-form. An invalid config fails the connect with
+it is not free-form. An invalid config fails the request with
 `400 invalid_sync_config` and a message naming each offending key. In particular:
 
 | Key | Accepted |
@@ -991,12 +1054,47 @@ it is not free-form. An invalid config fails the connect with
 | `products.pageSize` | integer 1–500 |
 | `orders.idempotencyHeader` | a valid HTTP header name |
 | `orders.requiresTaxId` | a boolean (default `false` — see §4.3.2) |
-| `documentHosts` | up to 10 **bare hostnames** (`files.your-erp.com`) — never a URL, port, or path |
+| `documentHosts` | up to 10 **bare hostnames** (`files.your-erp.com`) — never a URL, port, path, or IP literal |
 | `frequency` / `scheduleExpression` | `hourly\|daily\|weekly`, or a `rate(…)` / `cron(…)` expression |
 
 Unknown sections or options are **rejected**, not silently ignored, so a typo
-surfaces at connect time instead of looking like a feature that does not work. The
-stored result is echoed back in the `connect` and `status` responses.
+surfaces when you send it instead of looking like a feature that does not work. The
+stored result is echoed back in the integration and `status` responses.
+
+### 7.1 Editing overrides later — `PATCH /integrations/{provider}`
+
+To change one override without restating the rest:
+
+```
+PATCH /api/v1/resellers/me/integrations/{provider}
+{
+  "syncConfig": { "documentHosts": ["files.your-erp.com", "cdn.your-erp.com"] }
+}
+```
+
+**Semantics.**
+
+- Only the **top-level keys you name** inside `syncConfig` are touched; the rest are
+  kept.
+- A named section is **replaced, not deep-merged** — `{"products": {"path": "/v2"}}`
+  makes `/v2` your *entire* `products` section. Read the current one from
+  `GET /integrations/{provider}` and send it back with your change applied.
+- `null` **deletes** a key, resetting it to its default: `{"orders": null}`.
+- The merged result is validated by the **same rules** as creation (§7 table), so a
+  patch can never store something a create would have refused. Errors are
+  `400 invalid_sync_config` and name each offending key.
+- `products.mode` is never settable: it is the legacy spelling of `integrationMode`,
+  and an explicit `integrationMode` supersedes it.
+
+**Effect.** Everything except the schedule keys takes effect on your next call, with
+nothing to redeploy. Changing `enabled`, `frequency`, `scheduleExpression` or
+`integrationMode` reconciles the sync schedule of every attached customer; the
+response reports `affectedTenants` and `schedulesReconciled`.
+
+**Rejected invoice documents.** If an `invoice.issued` was rejected with a document
+error because its URL was not on the allow-list, add the host here and then retry
+that operation (`POST .../integration/operations/{operationId}/retry`) — the invoice
+header is upserted idempotently, so the retry only fills in the missing document.
 
 ---
 
@@ -1035,9 +1133,13 @@ authoritative value you sent (`stock.updated`, or the `/products` pull).
 
 - **Outbound** requests only ever go to your registered **https** `base_url` host
   (and allow-listed `documentHosts` for invoice PDFs). Redirects are re-validated
-  each hop; private/internal addresses are refused (SSRF hardening).
+  each hop; private/internal addresses are refused (SSRF hardening). A document URL
+  on any other host is rejected as `ssrf_blocked` — widen the allow-list through
+  `documentHosts` (§7.1); it is never disabled.
 - **Inbound** is authenticated solely by the HMAC signature — the URL is not a
-  secret, the signature is. Rotate the `webhookSecret` by re-connecting.
+  secret, the signature is. Rotate it with
+  `PUT /integrations/{provider}/webhook-secret` (§2.3) — one signing secret per
+  reseller, so the rotation applies to every webhook you send us.
 - WeAreDA never logs your credentials or raw request/response bodies. **Customer
   fiscal identifiers are masked** (`20-******78-9`) wherever they appear in an
   operational log, and are never written to an audit record in full.
@@ -1045,8 +1147,15 @@ authoritative value you sent (`stock.updated`, or the `/products` pull).
   and every consumer must ignore fields it does not know. The `customer` object and
   its `tax_id` (§4.3) were added that way — no existing field was renamed, removed,
   or given a new meaning, so an integration written before them keeps working
-  unchanged and no version bump was warranted. A breaking change would get a new
+  unchanged and no version bump was warranted. A breaking change gets a new
   path, not a silent redefinition.
+- **One breaking change has been made, and it followed that rule.** The configuration
+  split of §2 retired `POST .../integration/connect` because it wrote reseller-wide
+  settings from a tenant-scoped URL: connecting one customer rewrote every other
+  customer's configuration. The replacements are new paths (`POST /integrations`,
+  `POST .../integration/attach`), and the old one answers `410 endpoint_removed`
+  naming them — never a redefinition of the same path under the same method. Nothing
+  in §4–§6, the connector data contract you implement, changed.
 - Timeouts: outbound calls use a bounded timeout (≤ 60 s; ~10–15 s typical) — your
   endpoints should respond well within that or return `202`-style fast acks and do
   heavy work async on your side.

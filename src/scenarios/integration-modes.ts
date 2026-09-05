@@ -24,8 +24,11 @@ import { inboundAuthHeaders, scenarioBanner, step } from './harness.js';
 import {
   INTEGRATION_MODES,
   INTEGRATION_MODE_SHAPES,
-  validateConnectBody,
+  validateAttachBody,
+  validateCreateIntegrationBody,
+  type CreateIntegrationBody,
   type IntegrationMode,
+  type StoredIntegration,
 } from '../weareda/integration-mode.js';
 import { log } from '../lib/logger.js';
 
@@ -59,8 +62,10 @@ async function main(): Promise<void> {
   const base = loadConfig();
 
   scenarioBanner('SCENARIO: the four integrationModes', [
-    'integrationMode is a TOP-LEVEL field of the connect body, a sibling of',
-    'orderDeliveryStatus. Not inside declaredCapabilities, not inside syncConfig.',
+    'integrationMode is a TOP-LEVEL field of the INTEGRATION body (contract 2.1),',
+    'so it is reseller-wide: one value shared by every customer you serve. Not',
+    'inside declaredCapabilities, not inside syncConfig, and not in the per-tenant',
+    'attach body - orderStatusWrite is the one that lives there.',
     '',
     'Each mode below is started for real and called the way WeAreDA would.',
   ]);
@@ -74,18 +79,18 @@ async function main(): Promise<void> {
     log.plain(shape.summary);
     log.plain('');
 
-    const connectBody = {
+    const createBody: CreateIntegrationBody = {
       provider: 'generic_http',
       baseUrl: 'https://example.trycloudflare.com',
-      authType: 'api_key' as const,
+      authType: 'api_key',
+      credentialScope: 'reseller',
       externalCredentials: { apiKey: 'demo_secret' },
       webhookSecret: 'whsec_example',
-      orderDeliveryStatus: 'confirmed',
       integrationMode: mode,
     };
-    const verdict = validateConnectBody(connectBody);
-    log.plain('Connect body:');
-    log.plain(JSON.stringify({ ...connectBody, externalCredentials: { apiKey: '***' } }, null, 2));
+    const verdict = validateCreateIntegrationBody(createBody);
+    log.plain('POST /api/v1/resellers/me/integrations  (integration scope, once):');
+    log.plain(JSON.stringify({ ...createBody, externalCredentials: { apiKey: '***' } }, null, 2));
     log.plain('');
     log.plain('WeAreDA answers:');
     log.plain(
@@ -104,9 +109,22 @@ async function main(): Promise<void> {
     );
     if (!shape.reads) {
       log.plain('');
-      log.plain('No sync schedule is created - and any schedule from a previous');
-      log.plain('connect is deleted. The catalog arrives as product.updated webhooks.');
+      log.plain('No sync schedule is created - and any schedule left by a previous');
+      log.plain('mode is deleted. The catalog arrives as product.updated webhooks.');
     }
+
+    log.plain('');
+    log.plain('Then, once per customer:');
+    log.plain(
+      JSON.stringify(
+        {
+          POST: '/api/v1/resellers/me/tenants/{tenantId}/integration/attach',
+          body: { provider: 'generic_http', orderDeliveryStatus: 'confirmed' },
+        },
+        null,
+        2,
+      ),
+    );
 
     const { sandbox, config, baseUrl } = await startInMode(base, mode);
     log.plain('');
@@ -142,27 +160,27 @@ async function main(): Promise<void> {
   /* -------------------------------------------------------------------- */
   step(++index, 'What the modes do NOT let you do');
 
-  const rejections: Array<[string, Record<string, unknown>]> = [
-    [
-      'orderStatusWrite on a mode that never receives an order',
-      { integrationMode: 'query_only', orderStatusWrite: true },
-    ],
+  const createRejections: Array<[string, Record<string, unknown>]> = [
     [
       'a products.mode that contradicts the derived transport',
       { integrationMode: 'query_and_send', syncConfig: { products: { mode: 'push' } } },
     ],
-    ['orderStatusWrite as the STRING "true"', { orderStatusWrite: 'true' }],
     [
       'integrationMode inside declaredCapabilities',
       { declaredCapabilities: { integrationMode: 'query_only' } },
     ],
+    [
+      'orderStatusWrite in the INTEGRATION body - it is a per-TENANT setting',
+      { orderStatusWrite: true },
+    ],
     ['orderStatusWrite inside syncConfig', { syncConfig: { orderStatusWrite: true } }],
   ];
 
-  for (const [title, patch] of rejections) {
-    const verdict = validateConnectBody({
+  for (const [title, patch] of createRejections) {
+    const verdict = validateCreateIntegrationBody({
       provider: 'generic_http',
       baseUrl: 'https://example.trycloudflare.com',
+      externalCredentials: { apiKey: 'demo_secret' },
       ...patch,
     });
     log.plain('');
@@ -173,11 +191,50 @@ async function main(): Promise<void> {
     }
   }
 
+  const integration: StoredIntegration = {
+    provider: 'generic_http',
+    integrationMode: 'query_only',
+    credentialScope: 'reseller',
+  };
+  const attachRejections: Array<[string, Record<string, unknown>, StoredIntegration]> = [
+    [
+      'orderStatusWrite on a mode that never receives an order',
+      { orderStatusWrite: true },
+      integration,
+    ],
+    [
+      'orderStatusWrite as the STRING "true"',
+      { orderStatusWrite: 'true' },
+      { ...integration, integrationMode: 'query_and_send' },
+    ],
+    [
+      'baseUrl in the ATTACH body - it would reconfigure every other customer',
+      { baseUrl: 'https://other.example.com' },
+      { ...integration, integrationMode: 'query_and_send' },
+    ],
+    [
+      'a credential at attach time when the integration holds one per reseller',
+      { externalCredentials: { apiKey: 'sk_live_x' } },
+      { ...integration, integrationMode: 'query_and_send' },
+    ],
+  ];
+
+  for (const [title, patch, stored] of attachRejections) {
+    const verdict = validateAttachBody({ provider: 'generic_http', ...patch }, stored);
+    log.plain('');
+    log.plain(`${title}:`);
+    for (const error of verdict.errors) {
+      log.plain(`  ${error.status} ${error.error}`);
+      log.plain(`  ${error.message}`);
+    }
+  }
+
   log.plain('');
   log.plain('And the one that is NOT an error - a top-level key WeAreDA does not know:');
-  const dropped = validateConnectBody({
+  const dropped = validateCreateIntegrationBody({
     provider: 'generic_http',
     baseUrl: 'https://example.trycloudflare.com',
+    externalCredentials: { apiKey: 'demo_secret' },
     productsSyncMode: 'push',
   });
   log.plain(`  ok: ${dropped.ok}, silently dropped: ${dropped.ignoredKeys.join(', ')}`);
@@ -189,12 +246,17 @@ async function main(): Promise<void> {
     'receive_and_send is NOT "no outbound calls" - orders are still',
     'delivered. Delivering an order is a send, not a query.',
     '',
-    'receive_only still requires a baseUrl at connect time. It is',
-    'registered, not called.',
+    'receive_only still requires a baseUrl when you create the',
+    'integration. It is registered, not called.',
+    '',
+    'And the mode lives at INTEGRATION scope while orderStatusWrite lives',
+    'at TENANT scope, so a mode change never starts rewriting a',
+    'customer-facing column for all of your tenants at once.',
     '',
     'Run one for yourself:',
     '  INTEGRATION_MODE=receive_only npm run dev',
-    '  npm run cli -- integration:connect --mode receive_only',
+    '  npm run cli -- integration:create --mode receive_only',
+    '  npm run cli -- integration:attach',
   ]);
 }
 

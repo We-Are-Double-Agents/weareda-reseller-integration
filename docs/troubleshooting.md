@@ -6,39 +6,109 @@ request was going.
 
 ---
 
-## Connect time: registering the integration
+## Configuration time: registering the integration
 
-### `400 invalid_request` on connect
+Configuration has **two scopes** (contract §2) and two calls:
+`POST /api/v1/resellers/me/integrations` once, then
+`POST .../tenants/{tenantId}/integration/attach` per customer. Most failures
+below are one of them being handed a field belonging to the other.
 
-One of the top-level fields is wrong. In order of how often it happens:
+### `410 endpoint_removed` from `POST .../integration/connect`
+
+That endpoint is gone. It took both scopes in one body against a tenant-scoped
+URL and upserted the shared half, so connecting one customer rewrote every other
+customer's `baseUrl`, auth type, credential scope, capabilities and `syncConfig`
+— and rotated the shared credential as a side effect.
+
+Replace one `connect` with:
+
+```bash
+npm run cli -- integration:create --mode query_and_send   # once
+npm run cli -- integration:attach --order-status-write    # per customer
+```
+
+The response names the same two paths, and so does
+`npm run cli -- integration:connect`, which no longer calls anything.
+
+### `400 invalid_request` — a field of the wrong scope
+
+The message always names the call the field belongs to.
+
+| Message names | Cause | Fix |
+|---|---|---|
+| `<field> is an INTEGRATION setting, shared by every tenant of yours` | you put `baseUrl`, `integrationMode`, `credentialScope`, `syncConfig` or `declaredCapabilities` in an **attach** body | send it to `POST /integrations` (or `PATCH /integrations/{provider}`); attaching a customer must never reconfigure the others |
+| `<field> is a TENANT setting` | you put `orderStatusWrite`, `orderDeliveryStatus` or `externalTenantId` in the **integration** body | send it to `.../integration/attach` |
+| `externalCredentials does not belong here at credentialScope "tenant"` | you sent a credential when creating a tenant-scoped integration | there is no customer yet to own it — send it with each attach |
+| `externalCredentials is required at credentialScope "reseller"` | the reseller-wide credential is missing | send it in the create body |
+| `externalCredentials belongs here only at credentialScope "tenant"` | you sent a credential while attaching a reseller-scoped integration | rotate the shared one with `PUT /integrations/{provider}/credentials` |
+| `<field> is not patchable … use PUT` | you tried to rotate a credential or the webhook secret inside a `PATCH` | rotation is never a side effect: use its own `PUT` |
+
+### `400 invalid_request` — a value that is wrong
 
 | Message names | Cause | Fix |
 |---|---|---|
 | `orderStatusWrite must be a boolean` | you sent the **string** `"true"` | send a real boolean |
 | `orderStatusWrite requires an integrationMode that delivers orders` | you combined it with `query_only` / `receive_only` | pick `query_and_send` or `receive_and_send`, or drop the flag |
 | `integrationMode must be one of…` | a typo, or a mode that does not exist | `query_and_send` · `receive_and_send` · `query_only` · `receive_only` |
-| `declaredCapabilities.<key> is not a capability` | you nested `integrationMode` / `orderStatusWrite` in there, or invented a capability | move them to the **top level**; the six keys are `productsRead`, `productsWrite`, `stockRead`, `stockWebhooks`, `ordersWrite`, `invoices` |
-| `baseUrl is required` | you left it out of a `receive_only` connect | `receive_only` still registers a `baseUrl`; it is registered, not called |
+| `declaredCapabilities.<key> is not a capability` | you nested `integrationMode` / `orderStatusWrite` in there, or invented a capability | move each to the body its scope belongs to; the six keys are `productsRead`, `productsWrite`, `stockRead`, `stockWebhooks`, `ordersWrite`, `invoices` |
+| `baseUrl is required` | you left it out of a `receive_only` integration | `receive_only` still registers a `baseUrl`; it is registered, not called |
 
-### `400 invalid_sync_config` on connect
+### `409 integration_exists`
+
+You already have an integration for that provider. `POST /integrations` is a
+**create, not an upsert**, precisely so it can never overwrite what your other
+customers are running on. Change it with
+`PATCH /api/v1/resellers/me/integrations/{provider}`.
+
+### `409 order_status_write_conflict`
+
+You asked for a mode that delivers no orders, while customers are opted into
+`orderStatusWrite` — the message names them. They would have no order to report
+a status on. Turn the flag off on those tenants
+(`PATCH .../tenants/{tenantId}/integration` with `"orderStatusWrite": false`),
+then change the mode.
+
+### `404 integration_not_found` when attaching
+
+You are attaching a customer to a provider you have not created yet. Run
+`integration:create` first; `integration:list` shows what exists.
+
+### `400 invalid_sync_config`
 
 `syncConfig` is a strict whitelist (contract §7), so a typo there fails loudly.
+It is validated the same way on a create and on the **merged** result of a
+`PATCH`, so a patch can never store something a create would have refused.
 
-- `syncConfig.integrationMode` / `syncConfig.orderStatusWrite` — both are
-  **top-level** connect fields, siblings of `orderDeliveryStatus`.
+- `syncConfig.integrationMode` — a top-level field of the **integration** body.
+- `syncConfig.orderStatusWrite` — a field of the **attach** body.
 - `syncConfig.products.mode` contradicting the mode — the transport is derived
   from `integrationMode`, and a contradiction is a `400`, not a precedence rule.
-  Remove `products.mode` and let the mode decide.
+  Remove `products.mode` and let the mode decide. In a `PATCH` it is not
+  settable at all.
+- a value outside the §7 table: an absolute `*.path`, a `pageSize` over 500, an
+  `idempotencyHeader` that is not a header name, or a `documentHosts` entry that
+  is a URL, carries a port or path, or is an **IP literal**.
+
+### My `PATCH` wiped half of a syncConfig section
+
+That is contract §7.1, working as specified: a named top-level key is
+**replaced whole**, not deep-merged, and `null` deletes it. Read the current
+value back first and send it with your change applied:
+
+```bash
+npm run cli -- integration:get
+npm run cli -- integration:patch --sync-config '{"products":{"path":"/v2","pageSize":200}}'
+```
 
 ### The setting I sent had no effect and no error
 
-Unknown keys at the **top level of the connect body** are dropped in **silence**.
+Unknown keys at the **top level of a body** are dropped in **silence**.
 `productsSyncMode` is the usual victim: it is a *response* field, never an input,
 and sending it does exactly nothing. (Unknown keys inside `syncConfig` are the
-opposite — rejected loudly.)
+opposite — rejected loudly, and so is a field of the wrong scope.)
 
-`npm run cli -- integration:connect` prints a warning naming every top-level key
-WeAreDA would drop, before it sends.
+`npm run cli -- integration:create` and `integration:attach` print a warning
+naming every top-level key WeAreDA would drop, before they send.
 
 ### `422 { "reason": "read_calls_disabled" }` from test-connection
 
@@ -49,12 +119,16 @@ to test — it is refused rather than run against an endpoint nobody calls.
 That is not a misconfiguration. If you *want* the test, you want a `query_*`
 mode.
 
-### A reconnect changed a setting I did not send
+### Re-attaching a customer changed a setting I did not send
 
-It should not have — omitting `integrationMode` or `orderStatusWrite` leaves the
-stored value unchanged. If the mode looks wrong on a pre-`integrationMode`
-integration, note the back-compat rule: a stored
+It should not have — attaching is idempotent per customer, and an omitted field
+keeps its stored value, as does an omitted field in a `PATCH`. If the mode looks
+wrong on a pre-`integrationMode` integration, note the back-compat rule: a stored
 `syncConfig.products.mode = "push"` reads as `receive_and_send`.
+
+Note also which call could have changed it. Nothing sent while attaching one
+customer can reach reseller-wide settings any more — that was the whole reason
+`connect` was retired.
 
 ---
 
@@ -288,7 +362,7 @@ operation says so in `result.detail`:
 
 | `result.detail` | what to do |
 |---|---|
-| `completed; status unchanged (status_write_disabled)` | the opt-in is off — reconnect with `"orderStatusWrite": true` |
+| `completed; status unchanged (status_write_disabled)` | the opt-in is off — re-attach that customer, or `PATCH .../tenants/{tenantId}/integration`, with `"orderStatusWrite": true` |
 | `completed; status unchanged (unmapped_state)` | you sent `rejected` / `failed` / `error`; those report an integration failure, not a business state |
 | `completed; status unchanged (already_current)` | the order was already there. Harmless |
 | `completed; status unchanged (backward)` | the ladder only advances, and this rung is below where the order sits — a late or reordered event |
@@ -430,7 +504,7 @@ be recorded, with `document_status: "failed"`.
 ### Everything says DRY RUN
 
 `WEAREDA_WEBHOOK_URL` and/or `WEAREDA_WEBHOOK_SECRET` are unset, so events are
-signed and printed but not sent. Either fill them in from your connect response,
+signed and printed but not sent. Either fill them in from your attach response,
 or run `npm run mock:weareda` and point at that.
 
 ### Stale state between experiments

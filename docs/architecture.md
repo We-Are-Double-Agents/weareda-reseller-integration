@@ -51,7 +51,7 @@ says so.
 | `routes/` | HTTP shape: status codes, validation errors, headers | Thin. No business rules. |
 | `services/` | The actual behaviour: catalog, stock, orders, idempotency | Where the contract rules live. |
 | `storage/` | SQLite schema and access | `node:sqlite`, no native dependencies. |
-| `weareda/` | Everything about the outbound wire format | Types, event builders, signing, read API, and the connect-time integration model. |
+| `weareda/` | Everything about the outbound wire format | Types, event builders, signing, read API, and the two-scope integration configuration model. |
 | `cli/`, `scenarios/` | Operator-facing entry points | Thin wrappers over `weareda/` and `services/`. |
 
 The code is deliberately explicit rather than clever. There is no dependency
@@ -79,16 +79,23 @@ The two derived predicates live next to the config that produces them
 (`readCallsEnabled`, `orderDeliveryEnabled` in `config/env.ts`), so no route file
 has to know the mode table.
 
-### The connect body is modelled, and validated locally
+### The two configuration scopes are modelled, and validated locally
 
 `weareda/integration-mode.ts` is the reseller's model of WeAreDA-side rules: the
-mode table, the capability intersection, and `validateConnectBody()`, which
-applies every documented `400` — including the placement traps — **before** the
-request leaves the process. The CLI prints the exact error WeAreDA would return.
+mode table, the capability intersection, the `syncConfig` whitelist and its
+§7.1 merge, and one validator per call —
+`validateCreateIntegrationBody()` (integration scope),
+`validateAttachBody()` (tenant scope) and `validatePatchIntegrationBody()`. Each
+applies every documented `400`/`409` — including the placement traps —
+**before** the request leaves the process, and the CLI prints the exact error
+WeAreDA would return.
 
-That is worth the duplication because the failure it prevents is the silent one:
-unknown keys at the top level of the connect body are dropped without a word, so
-a misplaced `integrationMode` looks exactly like a feature that does not work.
+That is worth the duplication because the failures it prevents are the silent
+ones. Unknown keys at the top level of a body are dropped without a word, so a
+misplaced `integrationMode` looks exactly like a feature that does not work —
+and, under the removed `connect`, a `baseUrl` sent while attaching one customer
+was not dropped at all: it was applied to every other customer of the reseller.
+Modelling the scopes separately is what makes that impossible to express.
 
 ### The order.status decision is one pure function
 
@@ -148,8 +155,10 @@ Tables: `orders`, `idempotency_records`, `stock_levels`, `inbound_requests`,
 Note what is *not* stored: the integration's own configuration. `integrationMode`
 and `orderStatusWrite` live in the environment, because they belong to WeAreDA's
 side of the integration — the sandbox mirrors them so it can behave consistently
-with what was registered, and `npm run cli -- integration:connect` is what
-registers them.
+with what was registered. The environment mirrors the same split the API has:
+`INTEGRATION_PROVIDER` / `INTEGRATION_MODE` / `CREDENTIAL_SCOPE` are
+reseller-wide and go out with `integration:create`; `EXTERNAL_TENANT_ID` /
+`ORDER_STATUS_WRITE` are per customer and go out with `integration:attach`.
 
 ### The tunnel is not part of the server
 
@@ -160,7 +169,9 @@ convenience rather than an architectural dependency.
 ### The mock receiver is a script, not a service
 
 `scripts/mock-weareda.mjs` imitates the WeAreDA side — the webhook responses, the
-connect plane (`connect` / `status` / `test-connection`), and the `order.status`
+configuration plane in both scopes (`POST /integrations` and its `GET`/`PATCH`/
+rotation paths, `attach` / `status` / `test-connection` / `disconnect`, and the
+`410` on the removed `connect`), and the `order.status`
 ladder — so you can exercise the outbound direction before you have a connection.
 It is a development aid; nothing in `src/` depends on it.
 

@@ -18,7 +18,8 @@ X-WeAreDA-Timestamp: 1787693018
 Content-Type: application/json
 ```
 
-`webhookUrl` comes from the connect response and looks like
+`webhookUrl` comes from the attach response for that customer (contract §2.2)
+and looks like
 `https://api.weareda.com/api/v1/reseller-webhooks/<connectionId>`. The URL is
 not a secret — the signature is.
 
@@ -239,7 +240,8 @@ curl http://localhost:4000/api/v1/mock/operations   # result.detail, last_error_
 curl http://localhost:4000/api/v1/mock/orders       # both status columns
 ```
 
-and for the connect plane, so `integration:connect` is a real round trip:
+and for the configuration plane in both scopes, so the whole of contract §2 is a
+real round trip:
 
 ```env
 WEAREDA_API_BASE_URL=http://localhost:4000
@@ -248,8 +250,11 @@ WEAREDA_TENANT_ID=tenant_demo
 ```
 
 ```bash
-npm run cli -- integration:connect --mode receive_and_send
+npm run cli -- integration:create --mode receive_and_send
+npm run cli -- integration:create --mode query_only   # 409 integration_exists
+npm run cli -- integration:attach
 npm run cli -- integration:test      # 422 read_calls_disabled
+npm run cli -- integration:connect   # the 410, and what replaced it
 ```
 
 The `/api/v1/mock/*` endpoints are a local aid; they are not in the contract.
